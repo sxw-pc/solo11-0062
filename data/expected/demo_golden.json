@@ -1,0 +1,26 @@
+{
+  "cohen_2x2": {
+    "annotator_a": ["topic_alpha", "topic_alpha", "topic_alpha", "topic_alpha", "topic_alpha", "topic_beta", "topic_beta", "topic_beta", "topic_beta", "topic_beta"],
+    "annotator_b": ["topic_alpha", "topic_alpha", "topic_alpha", "topic_alpha", "topic_beta", "topic_beta", "topic_beta", "topic_beta", "topic_beta", "topic_alpha"],
+    "expected": {
+      "value": 0.6,
+      "po": 0.8,
+      "pe": 0.5,
+      "Do": 0.2,
+      "De": 0.5
+    }
+  },
+  "rating_3x4": {
+    "items": [
+      ["topic_alpha", "topic_alpha", "topic_alpha"],
+      ["topic_alpha", "topic_alpha", "topic_beta"],
+      ["topic_alpha", "topic_beta", "topic_beta"],
+      ["topic_beta", "topic_beta", "topic_beta"]
+    ],
+    "expected": {
+      "fleiss": 0.3333333333333333,
+      "krippendorff_nominal": 0.38888888888888884,
+      "pairwise_agreement": 0.6666666666666666
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{"annotator_id": "A01", "confidence": 0.9, "item_id": "it_1001", "label": ["topic_alpha", "topic_beta"]}
+{"annotator_id": "A02", "confidence": 0.8, "item_id": "it_1001", "label": ["topic_alpha"]}
+{"annotator_id": "A03", "confidence": 0.85, "item_id": "it_1001", "label": ["topic_beta", "topic_alpha"]}
+{"annotator_id": "A01", "confidence": 0.9, "item_id": "it_1002", "label": ["topic_gamma"]}
+{"annotator_id": "A02", "confidence": 0.75, "item_id": "it_1002", "label": ["topic_gamma", "topic_delta"]}
+{"annotator_id": "A03", "confidence": 0.8, "item_id": "it_1002", "label": ["topic_gamma"]}
+{"annotator_id": "A01", "confidence": 0.5, "item_id": "it_1003", "label": []}
+{"annotator_id": "A02", "confidence": 0.7, "item_id": "it_1003", "label": ["other"]}
+{"annotator_id": "A03", "confidence": 0.65, "item_id": "it_1003", "label": ["other"]}
+{"annotator_id": "A01", "confidence": 0.9, "item_id": "it_1004", "label": ["topic_beta"]}
+{"annotator_id": "A02", "confidence": 0.8, "item_id": "it_1004", "label": ["topic_beta"]}
+{"annotator_id": "A03", "confidence": 0.85, "item_id": "it_1004", "label": ["topic_beta"]}

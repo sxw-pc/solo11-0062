@@ -1,0 +1,26 @@
+dataset:
+  path: ../data/raw/annotations_demo.csv
+  format: csv
+  encoding: utf-8
+label_space:
+  - topic_alpha
+  - topic_beta
+  - topic_gamma
+  - topic_delta
+  - other
+annotators:
+  - A01
+  - A02
+  - A03
+  - A04
+  - A05
+  - A06
+metric: krippendorff_nominal
+multi_label: false
+min_annotators_per_item: 3
+review_threshold: 0.6
+outlier_threshold: 0.65
+adjudication_file: ../data/adjudications/demo_adjudications.jsonl
+output_dir: ../output_strict
+db_path: ../var/tagconsensus.db
+strict: true

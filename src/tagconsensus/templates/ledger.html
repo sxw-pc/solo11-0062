@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>台账记录 · 标注合议台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <strong>标注合议台</strong>
+    <nav>
+      <a href="{{ url_for('overview') }}">运行概览</a>
+      <a href="{{ url_for('review') }}">度量与争议</a>
+      <a href="{{ url_for('ledger') }}">台账记录</a>
+    </nav>
+  </header>
+  <main>
+    <h1>台账记录</h1>
+    {% if not runs %}
+      <section class="empty">
+        <h2>尚无历史运行</h2>
+        <p>台账文件为空或尚未建立。请先运行一次本地全流程。</p>
+      </section>
+    {% else %}
+      <section>
+        <h2>历史运行</h2>
+        <table>
+          <thead>
+            <tr><th>run_id</th><th>开始时间</th><th>主指标</th><th>值</th><th>结论</th><th>记录数</th></tr>
+          </thead>
+          <tbody>
+            {% for run in runs %}
+              <tr class="{{ 'selected' if run.run_id == run_id else '' }}">
+                <td><a href="{{ url_for('ledger', run_id=run.run_id) }}"><code>{{ run.run_id }}</code></a></td>
+                <td>{{ run.started_at }}</td>
+                <td>{{ run.metric_name or "-" }}</td>
+                <td>{{ "%.12g"|format(run.metric_value) if run.metric_value is not none else "-" }}</td>
+                <td><span class="badge {{ run.conclusion }}">{{ run.conclusion_label }}</span></td>
+                <td>{{ run.data_records }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+      {% if detail %}
+        <section>
+          <h2>单次明细 · <code>{{ detail.run.run_id }}</code></h2>
+          <table>
+            <tbody>
+              <tr><th>方案指纹</th><td><code>{{ detail.run.config_fingerprint }}</code></td></tr>
+              <tr><th>数据 SHA-256</th><td><code>{{ detail.run.data_sha256 }}</code></td></tr>
+              <tr><th>标注人指纹</th><td><code>{{ detail.run.annotator_fingerprint }}</code></td></tr>
+              <tr><th>校验状态</th><td>{{ detail.run.validation_status }}</td></tr>
+              <tr><th>错误码</th><td>{{ detail.run.error_code or "-" }}</td></tr>
+            </tbody>
+          </table>
+        </section>
+        <section>
+          <h2>校验发现</h2>
+          {% if detail.findings %}
+            <table>
+              <thead><tr><th>severity</th><th>code</th><th>item</th><th>line</th><th>message</th></tr></thead>
+              <tbody>
+                {% for finding in detail.findings %}
+                  <tr>
+                    <td>{{ finding.severity }}</td>
+                    <td><code>{{ finding.code }}</code></td>
+                    <td>{{ finding.item_id or "-" }}</td>
+                    <td>{{ finding.line_no if finding.line_no is not none else "-" }}</td>
+                    <td>{{ finding.message }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <p>无。</p>
+          {% endif %}
+        </section>
+        <section>
+          <h2>指标</h2>
+          <table>
+            <thead><tr><th>范围</th><th>指标</th><th>值</th><th>po</th><th>pe</th><th>Do</th><th>De</th><th>错误码</th></tr></thead>
+            <tbody>
+              {% for metric in detail.metrics %}
+                <tr>
+                  <td>{{ metric.label }}</td>
+                  <td>{{ metric.metric_name }}</td>
+                  <td>{{ "%.12g"|format(metric.value) if metric.value is not none else "-" }}</td>
+                  <td>{{ "%.12g"|format(metric.po) if metric.po is not none else "-" }}</td>
+                  <td>{{ "%.12g"|format(metric.pe) if metric.pe is not none else "-" }}</td>
+                  <td>{{ "%.12g"|format(metric.do_value) if metric.do_value is not none else "-" }}</td>
+                  <td>{{ "%.12g"|format(metric.de_value) if metric.de_value is not none else "-" }}</td>
+                  <td>{{ metric.error_code or "-" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </section>
+        <section>
+          <h2>复核队列</h2>
+          {% if detail.review_queue %}
+            <table>
+              <thead><tr><th>条目</th><th>理由</th><th>得票率</th><th>状态</th></tr></thead>
+              <tbody>
+                {% for item in detail.review_queue %}
+                  <tr><td><code>{{ item.item_id }}</code></td><td>{{ item.reason }}</td>
+                    <td>{{ "%.6g"|format(item.vote_rate) if item.vote_rate is not none else "-" }}</td>
+                    <td>{{ item.status }}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <p>无。</p>
+          {% endif %}
+        </section>
+        <section>
+          <h2>裁决与产物</h2>
+          {% if detail.adjudications %}
+            <table>
+              <thead><tr><th>条目</th><th>裁决标签</th><th>复核人</th><th>理由</th><th>采纳</th></tr></thead>
+              <tbody>
+                {% for item in detail.adjudications %}
+                  <tr><td><code>{{ item.item_id }}</code></td><td>{{ item.decision_label }}</td>
+                    <td>{{ item.reviewer }}</td><td>{{ item.reason }}</td><td>{{ item.adopted }}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <p>无裁决记录。</p>
+          {% endif %}
+          <table>
+            <thead><tr><th>产物</th><th>路径</th><th>字节</th><th>sha256</th></tr></thead>
+            <tbody>
+              {% for item in detail.artifacts %}
+                <tr><td>{{ item.kind }}</td><td><code>{{ item.path }}</code></td>
+                  <td>{{ item.size_bytes }}</td><td><code>{{ item.sha256 }}</code></td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </section>
+      {% endif %}
+    {% endif %}
+  </main>
+  <footer>纯本地只读视图 · 不联网 · 数据不离开本机</footer>
+</body>
+</html>

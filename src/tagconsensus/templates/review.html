@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>度量与争议 · 标注合议台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <strong>标注合议台</strong>
+    <nav>
+      <a href="{{ url_for('overview') }}">运行概览</a>
+      <a href="{{ url_for('review') }}">度量与争议</a>
+      <a href="{{ url_for('ledger') }}">台账记录</a>
+    </nav>
+  </header>
+  <main>
+    <h1>度量与争议</h1>
+    {% if not latest %}
+      <section class="empty">
+        <h2>尚无运行记录</h2>
+        <p>完成一次本地运行后，这里会展示复核队列与标注人一致性。</p>
+      </section>
+    {% else %}
+      <p class="muted">当前展示最近一次运行 <code>{{ latest.run_id }}</code>，结论
+        <span class="badge {{ latest.conclusion }}">{{ latest.conclusion_label }}</span>。</p>
+      <nav class="filters" aria-label="理由码过滤">
+        <a href="{{ url_for('review') }}" class="{{ 'active' if not reason else '' }}">全部</a>
+        {% for code in reasons %}
+          <a href="{{ url_for('review', reason=code) }}" class="{{ 'active' if reason == code else '' }}">{{ code }}</a>
+        {% endfor %}
+      </nav>
+      <section>
+        <h2>复核队列{% if reason %} · {{ reason }}{% endif %}</h2>
+        {% if entries %}
+          <table>
+            <thead>
+              <tr><th>条目</th><th>首要理由</th><th>全部理由</th><th>票数分布</th><th>得票率</th><th>状态</th></tr>
+            </thead>
+            <tbody>
+              {% for item in entries %}
+                <tr>
+                  <td><code>{{ item.item_id }}</code></td>
+                  <td>{{ item.reason or "-" }}</td>
+                  <td>{{ item.reasons_list|join(", ") or "-" }}</td>
+                  <td>
+                    {% for label, count in item.votes_dict.items() %}
+                      <span class="vote">{{ label }}={{ count }}</span>
+                    {% endfor %}
+                  </td>
+                  <td>{{ "%.6g"|format(item.vote_rate) if item.vote_rate is not none else "-" }}</td>
+                  <td>{{ item.status or "-" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <p class="empty-inline">当前过滤条件下没有复核条目。</p>
+        {% endif %}
+      </section>
+      <section>
+        <h2>标注人一致性</h2>
+        <table>
+          <thead>
+            <tr><th>标注人</th><th>与多数决一致率</th><th>参与条目</th><th>可比较条目</th><th>缺失</th><th>越界</th><th>偏离标记</th></tr>
+          </thead>
+          <tbody>
+            {% for annotator in detail.annotators %}
+              <tr class="{{ 'flagged' if annotator.is_outlier else '' }}">
+                <td><code>{{ annotator.annotator_id }}</code></td>
+                <td>{{ "%.6g"|format(annotator.agreement_rate) if annotator.agreement_rate is not none else "-" }}</td>
+                <td>{{ annotator.participation_items }}</td>
+                <td>{{ annotator.compared_items }}</td>
+                <td>{{ annotator.missing_count }}</td>
+                <td>{{ annotator.out_of_space_count }}</td>
+                <td>{% if annotator.is_outlier %}ANNOTATOR_OUTLIER{% else %}-{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    {% endif %}
+  </main>
+  <footer>纯本地只读视图 · 不联网 · 数据不离开本机</footer>
+</body>
+</html>
