@@ -1,13 +1,39 @@
-"""Self-contained nominal agreement statistics with explicit degeneracy handling."""
+"""Self-contained nominal agreement statistics with explicit degeneracy handling.
+
+Bootstrap route choice (item-cluster percentile interval for
+krippendorff_nominal): two routes yield identical per-draw percentile
+distributions. Route A gives every sampled occurrence a synthetic item_id
+(models.resample_dataset), builds a temporary Dataset and reuses the unmodified
+compute_metric path, so the point-estimate formula stays the single source of
+truth and duplicate clusters can never be merged by the item_id dedup in
+Dataset.item_ids or the item_id bucketing in _single_units; its cost is copying
+the sampled annotations of one draw at a time (peak memory grows with the
+annotation count of one resample, not with the replicate count). Route B would
+weight each cluster's alpha sufficient statistics by its sampling multiplicity
+without building a Dataset — lower memory, but a second implementation of the
+same formula where a weighting mistake silently counts a multiply-drawn item
+once and narrows the interval. Correctness and auditability are decisive here,
+so Route A is implemented; degenerate draws (MetricError from the same code
+path as the point estimate, e.g. De == 0) are counted, never treated as
+alpha == 0, and never re-drawn.
+"""
 
 from __future__ import annotations
 
+import random
 from collections import Counter
+from dataclasses import replace
 from typing import Hashable, Iterable, Sequence
 
 from .config import Config
 from .errors import MetricError
-from .models import Dataset, LabelMetric, MetricResult
+from .models import (
+    BootstrapInterval,
+    Dataset,
+    LabelMetric,
+    MetricResult,
+    resample_dataset,
+)
 
 EPSILON = 1e-12
 
@@ -196,7 +222,7 @@ def _mean(values: Iterable[float | None]) -> float | None:
     return sum(present) / len(present) if present else None
 
 
-def compute_metric(dataset: Dataset, config: Config) -> MetricResult:
+def _compute_point(dataset: Dataset, config: Config) -> MetricResult:
     if not config.multi_label:
         result = _compute_one(dataset, config, None)
         return MetricResult(
@@ -228,3 +254,87 @@ def compute_metric(dataset: Dataset, config: Config) -> MetricResult:
         tuple(per_label),
         macro,
     )
+
+
+def _percentile(sorted_values: Sequence[float], q: float) -> float:
+    """Linear-interpolation percentile of an ascending sequence (q in [0, 1])."""
+    count = len(sorted_values)
+    if count == 1:
+        return sorted_values[0]
+    rank = q * (count - 1)
+    low = int(rank)
+    high = min(low + 1, count - 1)
+    fraction = rank - low
+    return sorted_values[low] * (1.0 - fraction) + sorted_values[high] * fraction
+
+
+def bootstrap_interval(dataset: Dataset, config: Config) -> BootstrapInterval | None:
+    """Fixed-seed item-cluster percentile bootstrap for krippendorff_nominal.
+
+    Each of the ``replicates`` draws samples as many item clusters as the
+    original item count, with replacement, carrying every annotation of each
+    drawn cluster. Draws whose resample makes the point estimate undefined
+    (MetricError, e.g. De == 0 under extreme category collapse or too few
+    eligible clusters under high missingness) are recorded as degenerate by
+    error code; they are excluded from the percentile distribution but never
+    treated as alpha == 0 and never re-drawn, so ``requested`` stays exactly
+    the configured replicate count. Returns None when the bootstrap is
+    disabled or the metric is not krippendorff_nominal.
+    """
+    spec = config.bootstrap
+    if config.metric != "krippendorff_nominal" or spec.replicates == 0:
+        return None
+    item_ids = list(dataset.item_ids)
+    if not item_ids:
+        return None
+    rng = random.Random(spec.seed)
+    values: list[float] = []
+    degenerate: Counter[str] = Counter()
+    for _ in range(spec.replicates):
+        draw = [item_ids[rng.randrange(len(item_ids))] for _ in item_ids]
+        resampled = resample_dataset(dataset, draw)
+        try:
+            values.append(_compute_point(resampled, config).value)
+        except MetricError as exc:
+            degenerate[exc.code] += 1
+    valid = len(values)
+    degenerate_codes = tuple(sorted(degenerate.items()))
+    base = {
+        "seed": spec.seed,
+        "confidence": spec.confidence,
+        "requested": spec.replicates,
+        "valid": valid,
+        "degenerate": spec.replicates - valid,
+        "min_valid_ratio": spec.min_valid_ratio,
+        "degenerate_codes": degenerate_codes,
+    }
+    if valid == 0:
+        return BootstrapInterval(
+            **base, status="unavailable", lower=None, upper=None,
+            unavailable_reason="NO_VALID_REPLICATES",
+        )
+    if valid / spec.replicates < spec.min_valid_ratio:
+        return BootstrapInterval(
+            **base, status="unavailable", lower=None, upper=None,
+            unavailable_reason="INSUFFICIENT_VALID_REPLICATES",
+        )
+    values.sort()
+    tail = (1.0 - spec.confidence) / 2.0
+    return BootstrapInterval(
+        **base,
+        status="ok",
+        lower=_percentile(values, tail),
+        upper=_percentile(values, 1.0 - tail),
+        unavailable_reason=None,
+    )
+
+
+def compute_metric(
+    dataset: Dataset, config: Config, *, bootstrap: bool = True
+) -> MetricResult:
+    result = _compute_point(dataset, config)
+    if bootstrap:
+        interval = bootstrap_interval(dataset, config)
+        if interval is not None:
+            result = replace(result, bootstrap=interval)
+    return result

@@ -28,8 +28,14 @@ TOP_LEVEL = {
     "output_dir",
     "db_path",
     "strict",
+    "bootstrap",
 }
 DATASET_FIELDS = {"path", "format", "encoding"}
+BOOTSTRAP_FIELDS = {"replicates", "confidence", "seed", "min_valid_ratio"}
+BOOTSTRAP_DEFAULT_REPLICATES = 1000
+BOOTSTRAP_DEFAULT_CONFIDENCE = 0.95
+BOOTSTRAP_DEFAULT_SEED = 20240521
+BOOTSTRAP_DEFAULT_MIN_VALID_RATIO = 0.8
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,29 @@ class DatasetSpec:
     raw_path: str
     format: str
     encoding: str
+
+
+@dataclass(frozen=True)
+class BootstrapSpec:
+    """Fixed-seed item-cluster percentile bootstrap plan (krippendorff_nominal).
+
+    ``replicates`` is the requested number of resamples; 0 disables the
+    bootstrap. ``min_valid_ratio`` is the minimum share of non-degenerate
+    replicates required for the interval to be reported as usable.
+    """
+
+    replicates: int = BOOTSTRAP_DEFAULT_REPLICATES
+    confidence: float = BOOTSTRAP_DEFAULT_CONFIDENCE
+    seed: int = BOOTSTRAP_DEFAULT_SEED
+    min_valid_ratio: float = BOOTSTRAP_DEFAULT_MIN_VALID_RATIO
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "replicates": self.replicates,
+            "confidence": self.confidence,
+            "seed": self.seed,
+            "min_valid_ratio": self.min_valid_ratio,
+        }
 
 
 @dataclass(frozen=True)
@@ -56,6 +85,7 @@ class Config:
     output_dir: Path
     db_path: Path
     strict: bool
+    bootstrap: BootstrapSpec
     fingerprint: str
 
     def summary(self) -> dict[str, Any]:
@@ -78,6 +108,7 @@ class Config:
             "output_dir": str(self.output_dir),
             "db_path": str(self.db_path),
             "strict": self.strict,
+            "bootstrap": self.bootstrap.summary(),
             "fingerprint": self.fingerprint,
         }
 
@@ -191,6 +222,61 @@ def _parse_bool(raw: dict[str, Any], key: str, default: bool) -> bool:
     return value
 
 
+def _non_negative_int(
+    mapping: dict[str, Any], key: str, default: int, field: str | None = None
+) -> int:
+    value = mapping.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigError(
+            "CFG_INT_RANGE", f"{field or key} must be an integer >= 0", field or key
+        )
+    return value
+
+
+def _parse_bootstrap(raw: dict[str, Any]) -> BootstrapSpec:
+    mapping = raw.get("bootstrap")
+    if mapping is None:
+        return BootstrapSpec()
+    if not isinstance(mapping, dict):
+        raise ConfigError("CFG_TYPE_INVALID", "bootstrap must be a mapping", "bootstrap")
+    unknown = sorted(set(mapping) - BOOTSTRAP_FIELDS)
+    if unknown:
+        raise ConfigError(
+            "CFG_UNKNOWN_FIELD",
+            f"unknown bootstrap field {unknown[0]}",
+            f"bootstrap.{unknown[0]}",
+        )
+    replicates = _non_negative_int(
+        mapping, "replicates", BOOTSTRAP_DEFAULT_REPLICATES, "bootstrap.replicates"
+    )
+    seed = _non_negative_int(mapping, "seed", BOOTSTRAP_DEFAULT_SEED, "bootstrap.seed")
+    confidence_raw = mapping.get("confidence", BOOTSTRAP_DEFAULT_CONFIDENCE)
+    if isinstance(confidence_raw, bool) or not isinstance(confidence_raw, (int, float)):
+        raise ConfigError(
+            "CFG_THRESHOLD_RANGE", "bootstrap.confidence must be a number",
+            "bootstrap.confidence",
+        )
+    confidence = float(confidence_raw)
+    if not 0.0 < confidence < 1.0:
+        raise ConfigError(
+            "CFG_THRESHOLD_RANGE", "bootstrap.confidence must be within (0, 1)",
+            "bootstrap.confidence",
+        )
+    min_valid_raw = mapping.get("min_valid_ratio", BOOTSTRAP_DEFAULT_MIN_VALID_RATIO)
+    if isinstance(min_valid_raw, bool) or not isinstance(min_valid_raw, (int, float)):
+        raise ConfigError(
+            "CFG_THRESHOLD_RANGE", "bootstrap.min_valid_ratio must be a number",
+            "bootstrap.min_valid_ratio",
+        )
+    min_valid_ratio = float(min_valid_raw)
+    if min_valid_ratio < 0.0 or min_valid_ratio > 1.0:
+        raise ConfigError(
+            "CFG_THRESHOLD_RANGE", "bootstrap.min_valid_ratio must be within [0, 1]",
+            "bootstrap.min_valid_ratio",
+        )
+    return BootstrapSpec(replicates, confidence, seed, min_valid_ratio)
+
+
 def load_config(path: str | Path) -> Config:
     config_path = Path(path).resolve()
     try:
@@ -227,6 +313,7 @@ def load_config(path: str | Path) -> Config:
     outlier_threshold = _threshold(raw, "outlier_threshold", 0.65)
     multi_label = _parse_bool(raw, "multi_label", False)
     strict = _parse_bool(raw, "strict", False)
+    bootstrap = _parse_bootstrap(raw)
     output_dir = _resolve(
         base, _normal_text(_required(raw, "output_dir", "output_dir"), "output_dir")
     )
@@ -258,6 +345,7 @@ def load_config(path: str | Path) -> Config:
         "output_dir": str(output_dir),
         "db_path": str(db_path),
         "strict": strict,
+        "bootstrap": bootstrap.summary(),
     }
     return Config(
         config_path=config_path,
@@ -274,5 +362,6 @@ def load_config(path: str | Path) -> Config:
         output_dir=output_dir,
         db_path=db_path,
         strict=strict,
+        bootstrap=bootstrap,
         fingerprint=sha256_text(stable_json(semantic)),
     )

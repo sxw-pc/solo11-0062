@@ -96,6 +96,91 @@ class Dataset:
         return sha256_text(stable_json(self.fingerprint_dict()))
 
 
+RESAMPLE_ID_MARKER = "#bootstrap#"
+
+
+def resample_dataset(dataset: Dataset, item_ids: Iterable[str]) -> Dataset:
+    """Build an item-cluster bootstrap resample as a new immutable Dataset.
+
+    ``item_ids`` is one bootstrap draw: as many entries as the original item
+    count, sampled with replacement, so the same original item may appear
+    several times. Each entry becomes an *independent occurrence* carrying all
+    annotations of its source cluster. Because ``Dataset.item_ids`` deduplicates
+    by item_id and the metric layer buckets annotations by item_id, every
+    occurrence receives a synthetic item_id (``<item_id>#bootstrap#<k>`` with
+    ``k`` the draw position, unique within the draw); duplicate draws of one
+    cluster are therefore never merged back into a single unit.
+
+    The source dataset is not modified; file metadata is carried over so the
+    resample stays traceable to its origin.
+    """
+    by_item: dict[str, list[Annotation]] = {}
+    for row in dataset.annotations:
+        by_item.setdefault(row.item_id, []).append(row)
+    annotations: list[Annotation] = []
+    for occurrence, item_id in enumerate(item_ids):
+        synthetic_id = f"{item_id}{RESAMPLE_ID_MARKER}{occurrence}"
+        for row in by_item.get(item_id, ()):
+            annotations.append(
+                Annotation(
+                    row.annotator_id,
+                    synthetic_id,
+                    row.labels,
+                    row.confidence,
+                    row.line_no,
+                )
+            )
+    return Dataset(
+        annotations=tuple(annotations),
+        source_path=dataset.source_path,
+        file_format=dataset.file_format,
+        file_sha256=dataset.file_sha256,
+        parse_findings=dataset.parse_findings,
+    )
+
+
+@dataclass(frozen=True)
+class BootstrapInterval:
+    """Fixed-seed item-cluster percentile bootstrap result for one metric run.
+
+    ``requested`` is the configured replicate count and never changes, even
+    when some draws are degenerate; degenerate draws are counted in
+    ``degenerate`` (broken down by error code in ``degenerate_codes``) and
+    excluded from the percentile distribution instead of being treated as 0
+    or silently re-drawn. ``status`` is "ok" when the valid ratio meets
+    ``min_valid_ratio``; otherwise "unavailable" and the bounds are None with
+    ``unavailable_reason`` explaining why.
+    """
+
+    seed: int
+    confidence: float
+    requested: int
+    valid: int
+    degenerate: int
+    min_valid_ratio: float
+    status: str
+    lower: float | None
+    upper: float | None
+    unavailable_reason: str | None
+    degenerate_codes: tuple[tuple[str, int], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "method": "item_cluster_percentile",
+            "seed": self.seed,
+            "confidence": self.confidence,
+            "requested": self.requested,
+            "valid": self.valid,
+            "degenerate": self.degenerate,
+            "min_valid_ratio": self.min_valid_ratio,
+            "status": self.status,
+            "lower": self.lower,
+            "upper": self.upper,
+            "unavailable_reason": self.unavailable_reason,
+            "degenerate_codes": {code: count for code, count in self.degenerate_codes},
+        }
+
+
 @dataclass(frozen=True)
 class LabelMetric:
     label: str | None
@@ -134,6 +219,7 @@ class MetricResult:
     eligible_annotations: int
     per_label: tuple[LabelMetric, ...] = field(default_factory=tuple)
     macro_average: float | None = None
+    bootstrap: BootstrapInterval | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -147,6 +233,7 @@ class MetricResult:
             "eligible_annotations": self.eligible_annotations,
             "macro_average": self.macro_average,
             "per_label": [entry.to_dict() for entry in self.per_label],
+            "bootstrap": self.bootstrap.to_dict() if self.bootstrap else None,
         }
 
 

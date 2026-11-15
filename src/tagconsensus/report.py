@@ -133,6 +133,29 @@ def _table(headers: list[str], rows: Iterable[Iterable[Any]]) -> list[str]:
     return lines
 
 
+def _bootstrap_lines(bootstrap: dict[str, Any]) -> list[str]:
+    lines = [
+        "", "### Bootstrap 区间（item-cluster percentile）", "",
+        f"- 种子 `{bootstrap['seed']}`；置信水平 {_fmt(bootstrap['confidence'])}；"
+        f"最低有效比例 {_fmt(bootstrap['min_valid_ratio'])}",
+        f"- 重复：请求 {bootstrap['requested']}，有效 {bootstrap['valid']}，"
+        f"退化 {bootstrap['degenerate']}",
+    ]
+    degenerate_codes = bootstrap.get("degenerate_codes") or {}
+    if degenerate_codes:
+        breakdown = "、".join(
+            f"{code}×{count}" for code, count in sorted(degenerate_codes.items())
+        )
+        lines.append(f"- 退化构成：{breakdown}")
+    if bootstrap["status"] == "ok":
+        lines.append(
+            f"- 区间：[{_fmt(bootstrap['lower'])}, {_fmt(bootstrap['upper'])}]"
+        )
+    else:
+        lines.append(f"- 状态：不可用（{bootstrap['unavailable_reason']}）")
+    return lines
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     run, metric = report["run"], report["metrics"]
     lines = [
@@ -173,6 +196,8 @@ def render_markdown(report: dict[str, Any]) -> str:
                 ([item["label"], _fmt(item["value"]), _fmt(item["po"]),
                   _fmt(item["pe"]), _fmt(item["error_code"])]
                  for item in metric["per_label"])))
+        if metric.get("bootstrap"):
+            lines.extend(_bootstrap_lines(metric["bootstrap"]))
     lines.extend(["", "## 复核队列", ""])
     if report["review_queue"]:
         lines.extend(_table(

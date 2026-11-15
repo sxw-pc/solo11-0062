@@ -154,7 +154,9 @@ def leave_one_out(
     results: list[LeaveOneOut] = []
     for annotator_id in dataset.annotators:
         try:
-            result = compute_metric(dataset.without_annotator(annotator_id), config)
+            result = compute_metric(
+                dataset.without_annotator(annotator_id), config, bootstrap=False
+            )
             delta = result.value - baseline.value
             results.append(LeaveOneOut(annotator_id, result.value, delta, None))
         except MetricError as exc:

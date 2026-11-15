@@ -29,6 +29,13 @@ CREATE TABLE IF NOT EXISTS metrics (
   eligible_items INTEGER, eligible_annotations INTEGER, error_code TEXT,
   PRIMARY KEY (run_id, label)
 );
+CREATE TABLE IF NOT EXISTS bootstrap_intervals (
+  run_id TEXT PRIMARY KEY, metric_name TEXT NOT NULL,
+  seed INTEGER NOT NULL, confidence REAL NOT NULL, min_valid_ratio REAL NOT NULL,
+  requested INTEGER NOT NULL, valid INTEGER NOT NULL, degenerate INTEGER NOT NULL,
+  status TEXT NOT NULL, lower REAL, upper REAL,
+  unavailable_reason TEXT, degenerate_codes TEXT
+);
 CREATE TABLE IF NOT EXISTS review_queue (
   run_id TEXT NOT NULL, item_id TEXT NOT NULL, reason TEXT, reasons TEXT,
   annotator_count INTEGER, vote_rate REAL, votes TEXT, status TEXT,
@@ -102,8 +109,8 @@ def record_run(
                 "INSERT OR REPLACE INTO runs VALUES (" + ",".join("?" * 19) + ")", run_row
             )
             for table in (
-                "validation_findings", "metrics", "review_queue",
-                "annotators", "adjudications", "artifacts",
+                "validation_findings", "metrics", "bootstrap_intervals",
+                "review_queue", "annotators", "adjudications", "artifacts",
             ):
                 connection.execute(f"DELETE FROM {table} WHERE run_id = ?", (run["run_id"],))
             _insert_many(
@@ -131,6 +138,21 @@ def record_run(
                 connection,
                 "INSERT INTO metrics VALUES (?,?,?,?,?,?,?,?,?,?,?)", metric_rows
             )
+            bootstrap = metrics.get("bootstrap") if metrics else None
+            if bootstrap:
+                connection.execute(
+                    "INSERT INTO bootstrap_intervals VALUES "
+                    "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run["run_id"], metrics["name"], bootstrap["seed"],
+                        bootstrap["confidence"], bootstrap["min_valid_ratio"],
+                        bootstrap["requested"], bootstrap["valid"],
+                        bootstrap["degenerate"], bootstrap["status"],
+                        bootstrap["lower"], bootstrap["upper"],
+                        bootstrap["unavailable_reason"],
+                        stable_json(bootstrap.get("degenerate_codes", {})),
+                    ),
+                )
             _insert_many(
                 connection,
                 "INSERT INTO review_queue VALUES (?,?,?,?,?,?,?,?)",
@@ -251,6 +273,10 @@ def get_run(db_path: Path, run_id: str) -> dict[str, Any] | None:
             "metrics": _rows(
                 connection,
                 "SELECT * FROM metrics WHERE run_id = ? ORDER BY label", (run_id,),
+            ),
+            "bootstrap_intervals": _rows(
+                connection,
+                "SELECT * FROM bootstrap_intervals WHERE run_id = ?", (run_id,),
             ),
             "review_queue": _rows(
                 connection,

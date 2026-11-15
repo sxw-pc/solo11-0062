@@ -31,6 +31,27 @@ def _html_table(headers: list[str], rows: Iterable[Iterable[Any]]) -> str:
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def _bootstrap_html(bootstrap: dict[str, Any]) -> str:
+    rows = [
+        ("seed", bootstrap["seed"]),
+        ("confidence", bootstrap["confidence"]),
+        ("min_valid_ratio", bootstrap["min_valid_ratio"]),
+        ("requested", bootstrap["requested"]),
+        ("valid", bootstrap["valid"]),
+        ("degenerate", bootstrap["degenerate"]),
+    ]
+    degenerate_codes = bootstrap.get("degenerate_codes") or {}
+    if degenerate_codes:
+        rows.append(("degenerate_codes", json.dumps(
+            degenerate_codes, ensure_ascii=False, sort_keys=True)))
+    if bootstrap["status"] == "ok":
+        rows.append(("interval", f"[{_fmt(bootstrap['lower'])}, {_fmt(bootstrap['upper'])}]"))
+    else:
+        rows.append(("status", f"不可用（{bootstrap['unavailable_reason']}）"))
+    return ("<h3>Bootstrap 区间（item-cluster percentile）</h3>"
+            + _html_table(["field", "value"], rows))
+
+
 def render_html(report: dict[str, Any]) -> str:
     conclusion, metric = report["conclusion"], report["metrics"]
     parts = [
@@ -67,6 +88,8 @@ def render_html(report: dict[str, Any]) -> str:
                 ["label", "value", "po", "pe", "error"],
                 [(item["label"], item["value"], item["po"], item["pe"],
                   item["error_code"]) for item in metric["per_label"]]))
+        if metric.get("bootstrap"):
+            parts.append(_bootstrap_html(metric["bootstrap"]))
     parts.append("<h2>复核队列</h2>")
     if report["review_queue"]:
         parts.append(_html_table(

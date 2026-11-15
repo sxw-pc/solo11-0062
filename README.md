@@ -122,6 +122,10 @@ A04,it_0001,
 | `output_dir` | 是 | - | 报告与共识文件目录 |
 | `db_path` | 否 | 派生 | SQLite 台账文件路径 |
 | `strict` | 否 | `false` | 为 `true` 时把所有 warning 提升为 error |
+| `bootstrap.replicates` | 否 | `1000` | item-cluster bootstrap 重复次数；`0` 表示关闭 |
+| `bootstrap.confidence` | 否 | `0.95` | percentile 区间置信水平，开区间 `(0,1)` |
+| `bootstrap.seed` | 否 | `20240521` | 固定随机种子，同一方案与数据下结果可重放 |
+| `bootstrap.min_valid_ratio` | 否 | `0.8` | 有效（非退化）重复占比下限，闭区间 `[0,1]`，低于则区间记为不可用 |
 
 示例：见 `configs/demo.yaml` 与 `configs/strict.yaml`。字段名未知、类型错误、未知指标、阈值越界、标签为空或重复、pair 不在白名单等都会给出稳定错误码和字段路径。
 
@@ -177,6 +181,14 @@ alpha = 1 - Do / De
 ```
 
 `De == 0`（等价于 pe == 1）时返回 `METRIC_PE_ONE`。Krippendorff 的 De 与 Fleiss 的 1 - pe 不是同一个有限样本校正公式，两者数值可能不同。
+
+#### Bootstrap 区间（item-cluster percentile）
+
+`krippendorff_nominal` 在点估计之外输出固定种子的 item-cluster percentile bootstrap 区间，供验收人判断 alpha 的稳定性；点估计与结论判定不受影响。每次重复按原始条目数有放回地抽取条目簇，并带入簇内全部标注；同一条目可能被抽中多次，每次抽中都作为独立出现参与计算，不与原条目合并。种子、置信水平、请求/有效/退化重复数、区间边界或不可用原因随报告（JSON/Markdown/HTML）与台账 `bootstrap_intervals` 表一并保存，固定种子下完全可重放。
+
+高缺失或极端类别数据可能产生退化抽样（如 `De == 0` 或无条目达到两个有效标注）。退化重复**不**按 alpha = 0 计入分布，也**不**补抽凑数：请求重复数始终等于配置值，退化数按错误码分类记录。有效重复占比低于 `bootstrap.min_valid_ratio` 时区间记为不可用（`INSUFFICIENT_VALID_REPLICATES`；全部退化时为 `NO_VALID_REPLICATES`），边界输出空值。
+
+实现取舍：两条路线可得到完全相同的逐 draw percentile 分布。路线 A（本实现）为每次抽中的 occurrence 生成合成 item_id、构造临时 Dataset 并复用点估计的同一 `compute_metric` 代码路径——公式只有一处实现，重复簇身份清晰，代价是每个 draw 复制该次抽中的全部标注（峰值内存随单次重抽的标注数增长，不随重复次数增长）。路线 B 用抽样 multiplicity 加权各簇的充分统计量，不构造重复 Dataset，内存更低，但等于把同一公式再实现一遍，加权错误会让抽中多次的条目只算一次、区间偏窄。为保证区间与点估计严格同源，选择路线 A。
 
 ### 多标签模式
 
