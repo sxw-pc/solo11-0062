@@ -16,3 +16,6 @@ dist/
 .venv/
 venv/
 .env
+node_modules/
+*.pyc
+.benchmarks/
