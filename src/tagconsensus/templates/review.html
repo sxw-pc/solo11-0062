@@ -80,6 +80,46 @@
           </tbody>
         </table>
       </section>
+      {% if detail.assignment_coverage %}
+        {% set coverage = detail.assignment_coverage[0] %}
+        <section>
+          <h2>分配覆盖审计 · {{ coverage.mode }}</h2>
+          <table>
+            <thead>
+              <tr><th>预期组合</th><th>已提交</th><th>显式空标签</th><th>已分配无记录</th><th>未分配记录</th><th>覆盖率</th><th>完成率</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>{{ coverage.expected_pairs }}</td>
+                <td>{{ coverage.submitted_pairs }}</td>
+                <td>{{ coverage.explicit_empty_pairs }}</td>
+                <td>{{ coverage.missing_pairs }}</td>
+                <td>{{ coverage.unassigned_records }}</td>
+                <td>{{ "%.6g"|format(coverage.coverage_rate) if coverage.coverage_rate is not none else "-" }}</td>
+                <td>{{ "%.6g"|format(coverage.completion_rate) if coverage.completion_rate is not none else "-" }}</td>
+              </tr>
+            </tbody>
+          </table>
+          {% set assignment_findings = detail.findings | selectattr("code", "in", ["ASSIGNMENT_MISSING", "UNASSIGNED_ANNOTATION", "ASSIGNMENT_DUPLICATE_PAIR", "ASSIGNMENT_UNKNOWN_ANNOTATOR", "ASSIGNMENT_MALFORMED_ROW"]) | list %}
+          {% if assignment_findings %}
+            <table>
+              <thead><tr><th>severity</th><th>code</th><th>条目</th><th>标注人</th><th>行号</th><th>message</th></tr></thead>
+              <tbody>
+                {% for finding in assignment_findings %}
+                  <tr>
+                    <td>{{ finding.severity }}</td>
+                    <td><code>{{ finding.code }}</code></td>
+                    <td>{{ finding.item_id or "-" }}</td>
+                    <td>{{ finding.annotator_id or "-" }}</td>
+                    <td>{{ finding.line_no if finding.line_no is not none else "-" }}</td>
+                    <td>{{ finding.message }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% endif %}
+        </section>
+      {% endif %}
     {% endif %}
   </main>
   <footer>纯本地只读视图 · 不联网 · 数据不离开本机</footer>

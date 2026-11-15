@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS artifacts (
   run_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL,
   size_bytes INTEGER, sha256 TEXT, PRIMARY KEY (run_id, kind)
 );
+CREATE TABLE IF NOT EXISTS assignment_coverage (
+  run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, manifest_path TEXT,
+  manifest_sha256 TEXT, expected_pairs INTEGER, submitted_pairs INTEGER,
+  explicit_empty_pairs INTEGER, completed_pairs INTEGER, missing_pairs INTEGER,
+  unassigned_records INTEGER, coverage_rate REAL, completion_rate REAL
+);
 """
 
 
@@ -104,6 +110,7 @@ def record_run(
             for table in (
                 "validation_findings", "metrics", "review_queue",
                 "annotators", "adjudications", "artifacts",
+                "assignment_coverage",
             ):
                 connection.execute(f"DELETE FROM {table} WHERE run_id = ?", (run["run_id"],))
             _insert_many(
@@ -180,6 +187,19 @@ def record_run(
                     for item in artifacts
                 ],
             )
+            coverage = report.get("assignment_coverage")
+            if coverage and coverage.get("mode") != "discovery":
+                connection.execute(
+                    "INSERT INTO assignment_coverage VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run["run_id"], coverage["mode"], coverage.get("manifest_path"),
+                        coverage.get("manifest_sha256"), coverage["expected_pairs"],
+                        coverage["submitted_pairs"], coverage["explicit_empty_pairs"],
+                        coverage["completed_pairs"], coverage["missing_pairs"],
+                        coverage["unassigned_records"], coverage.get("coverage_rate"),
+                        coverage.get("completion_rate"),
+                    ),
+                )
             connection.commit()
         finally:
             connection.close()
@@ -267,6 +287,10 @@ def get_run(db_path: Path, run_id: str) -> dict[str, Any] | None:
             "artifacts": _rows(
                 connection,
                 "SELECT * FROM artifacts WHERE run_id = ? ORDER BY kind", (run_id,),
+            ),
+            "assignment_coverage": _rows(
+                connection,
+                "SELECT * FROM assignment_coverage WHERE run_id = ?", (run_id,),
             ),
         }
     finally:

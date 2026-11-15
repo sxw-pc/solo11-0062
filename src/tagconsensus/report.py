@@ -60,6 +60,24 @@ def _conclusion(
             "text": "校验、度量与争议检查均通过，可按方案使用本批共识标签。"}
 
 
+def _assignment_section(validation: ValidationResult) -> dict[str, Any] | None:
+    coverage = validation.coverage
+    if coverage is None or coverage.get("mode") == "discovery":
+        return None
+    codes = {
+        "ASSIGNMENT_MISSING", "UNASSIGNED_ANNOTATION",
+        "ASSIGNMENT_DUPLICATE_PAIR", "ASSIGNMENT_UNKNOWN_ANNOTATOR",
+        "ASSIGNMENT_MALFORMED_ROW",
+    }
+    return {
+        **coverage,
+        "findings": [
+            item.to_dict()
+            for item in validation.findings if item.code in codes
+        ],
+    }
+
+
 def build_report(
     *, config: Config, dataset: Dataset, validation: ValidationResult,
     run_id: str, started_at: str, completed_at: str,
@@ -85,6 +103,7 @@ def build_report(
                  "annotators": list(dataset.annotators),
                  "missing_annotations": dataset.missing_annotations},
         "validation": validation.to_dict(),
+        "assignment_coverage": _assignment_section(validation),
         "metrics": metric.to_dict() if metric is not None else None,
         "review_queue": review,
         "annotators": [
@@ -156,6 +175,23 @@ def render_markdown(report: dict[str, Any]) -> str:
             ([item["severity"], item["code"], _fmt(item["item_id"]),
               _fmt(item["annotator_id"]), _fmt(item["line_no"]), item["message"]]
              for item in findings)))
+    coverage = report.get("assignment_coverage")
+    if coverage:
+        lines.extend([
+            "", "## 分配覆盖审计", "",
+            f"模式 `{coverage['mode']}`；预期人-条目组合 {coverage['expected_pairs']}；"
+            f"已提交 {coverage['submitted_pairs']}（其中显式空标签 "
+            f"{coverage['explicit_empty_pairs']}）；已分配但无记录 {coverage['missing_pairs']}；"
+            f"未分配却出现记录 {coverage['unassigned_records']}；覆盖率 "
+            f"{_fmt(coverage['coverage_rate'])}；完成率 {_fmt(coverage['completion_rate'])}。",
+            "",
+        ])
+        if coverage["findings"]:
+            lines.extend(_table(
+                ["severity", "code", "item", "annotator", "line", "message"],
+                ([item["severity"], item["code"], _fmt(item["item_id"]),
+                  _fmt(item["annotator_id"]), _fmt(item["line_no"]), item["message"]]
+                 for item in coverage["findings"])))
     lines.extend(["", "## 一致性度量", ""])
     if metric is None:
         lines.append("本次运行未产出度量。")

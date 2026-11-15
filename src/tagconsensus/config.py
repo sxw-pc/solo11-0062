@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from .assignment import AssignmentManifestSpec, parse_assignment_spec
 from .errors import ConfigError
 from .hashing import sha256_text, stable_json
 
@@ -25,6 +26,7 @@ TOP_LEVEL = {
     "review_threshold",
     "outlier_threshold",
     "adjudication_file",
+    "assignment_manifest",
     "output_dir",
     "db_path",
     "strict",
@@ -53,6 +55,7 @@ class Config:
     review_threshold: float
     outlier_threshold: float
     adjudication_file: Path | None
+    assignment_manifest: AssignmentManifestSpec | None
     output_dir: Path
     db_path: Path
     strict: bool
@@ -75,6 +78,7 @@ class Config:
             "adjudication_file": (
                 str(self.adjudication_file) if self.adjudication_file else None
             ),
+            "assignment_manifest": _manifest_summary(self.assignment_manifest),
             "output_dir": str(self.output_dir),
             "db_path": str(self.db_path),
             "strict": self.strict,
@@ -85,6 +89,12 @@ class Config:
 def _resolve(base: Path, value: str) -> Path:
     candidate = Path(value)
     return candidate if candidate.is_absolute() else (base / candidate).resolve()
+
+
+def _manifest_summary(spec: AssignmentManifestSpec | None) -> dict[str, Any] | None:
+    if spec is None:
+        return None
+    return {"path": str(spec.path), "format": spec.format, "encoding": spec.encoding}
 
 
 def _required(mapping: dict[str, Any], key: str, field: str) -> Any:
@@ -239,6 +249,9 @@ def load_config(path: str | Path) -> Config:
         adjudication_file = _resolve(
             base, _normal_text(raw["adjudication_file"], "adjudication_file")
         )
+    assignment_manifest: AssignmentManifestSpec | None = None
+    if raw.get("assignment_manifest") is not None:
+        assignment_manifest = parse_assignment_spec(raw["assignment_manifest"], base)
 
     semantic = {
         "dataset": {
@@ -255,6 +268,7 @@ def load_config(path: str | Path) -> Config:
         "review_threshold": review_threshold,
         "outlier_threshold": outlier_threshold,
         "adjudication_file": str(adjudication_file) if adjudication_file else None,
+        "assignment_manifest": _manifest_summary(assignment_manifest),
         "output_dir": str(output_dir),
         "db_path": str(db_path),
         "strict": strict,
@@ -271,6 +285,7 @@ def load_config(path: str | Path) -> Config:
         review_threshold=review_threshold,
         outlier_threshold=outlier_threshold,
         adjudication_file=adjudication_file,
+        assignment_manifest=assignment_manifest,
         output_dir=output_dir,
         db_path=db_path,
         strict=strict,

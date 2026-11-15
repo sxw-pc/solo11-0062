@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
+from .assignment import (
+    AssignmentPlan,
+    assignment_coverage,
+    build_assignment_plan,
+    coverage_findings,
+)
 from .config import Config
 from .models import Annotation, Dataset, ValidationFinding
 
@@ -17,6 +23,8 @@ class ValidationResult:
     error_count: int
     warning_count: int
     promoted_count: int
+    assignment_mode: str = "discovery"
+    coverage: dict[str, Any] | None = None
 
     @property
     def blocked(self) -> bool:
@@ -75,13 +83,19 @@ def _duplicate_findings(annotations: Iterable[Annotation]) -> list[ValidationFin
     return findings
 
 
-def validate_dataset(dataset: Dataset, config: Config) -> ValidationResult:
+def validate_dataset(
+    dataset: Dataset, config: Config, plan: AssignmentPlan | None = None
+) -> ValidationResult:
+    if plan is None:
+        plan = build_assignment_plan(config, dataset)
     findings: list[ValidationFinding] = list(dataset.parse_findings)
+    findings.extend(plan.parse_findings)
     findings.extend(_duplicate_findings(dataset.annotations))
     if dataset.records == 0:
         findings.append(
             ValidationFinding("DATA_EMPTY", "error", "dataset contains no valid records")
         )
+    findings.extend(coverage_findings(dataset, plan))
 
     allowed_labels = set(config.label_space)
     allowed_annotators = set(config.annotators)
@@ -170,4 +184,11 @@ def validate_dataset(dataset: Dataset, config: Config) -> ValidationResult:
     error_count = sum(1 for item in findings if item.severity == "error")
     warning_count = sum(1 for item in findings if item.severity == "warning")
     promoted_count = sum(1 for item in findings if item.promoted)
-    return ValidationResult(tuple(findings), error_count, warning_count, promoted_count)
+    return ValidationResult(
+        tuple(findings),
+        error_count,
+        warning_count,
+        promoted_count,
+        plan.mode,
+        assignment_coverage(dataset, plan),
+    )

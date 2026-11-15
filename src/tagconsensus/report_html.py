@@ -51,8 +51,30 @@ def render_html(report: dict[str, Any]) -> str:
             ("validation_status", report["validation"]["status"]),
             ("errors", report["validation"]["error_count"]),
             ("warnings", report["validation"]["warning_count"])]),
-        "<h2>一致性度量</h2>",
     ]
+    coverage = report.get("assignment_coverage")
+    if coverage:
+        parts.extend([
+            "<h2>分配覆盖审计</h2>",
+            _html_table(
+                ["field", "value"],
+                [("mode", coverage["mode"]),
+                 ("expected_pairs", coverage["expected_pairs"]),
+                 ("submitted_pairs", coverage["submitted_pairs"]),
+                 ("explicit_empty_pairs", coverage["explicit_empty_pairs"]),
+                 ("completed_pairs", coverage["completed_pairs"]),
+                 ("missing_pairs", coverage["missing_pairs"]),
+                 ("unassigned_records", coverage["unassigned_records"]),
+                 ("coverage_rate", coverage["coverage_rate"]),
+                 ("completion_rate", coverage["completion_rate"])]),
+        ])
+        if coverage["findings"]:
+            parts.append(_html_table(
+                ["severity", "code", "item", "annotator", "line", "message"],
+                [(item["severity"], item["code"], item["item_id"],
+                  item["annotator_id"], item["line_no"], item["message"])
+                 for item in coverage["findings"]]))
+    parts.append("<h2>一致性度量</h2>")
     if metric is None:
         parts.append("<p>本次运行未产出度量。</p>")
     else:

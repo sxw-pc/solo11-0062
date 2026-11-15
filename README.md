@@ -111,7 +111,8 @@ A04,it_0001,
 | `dataset.format` | 是 | - | `csv` 或 `jsonl` |
 | `dataset.encoding` | 否 | `utf-8` | `utf-8` / `utf-8-sig` / `gbk` |
 | `label_space` | 是 | - | 允许标签全集，建议包含 `other` |
-| `annotators` | 否 | `[]` | 标注人白名单；空表示自动发现 |
+| `annotators` | 否 | `[]` | 标注人白名单；空表示自动发现。显式配置时参与全量分配推断 |
+| `assignment_manifest` | 否 | 无 | 离线分配清单，逐行声明预期的 `annotator_id`/`item_id` 组合；支持字符串路径或含 `path`/`format`/`encoding` 的映射，格式为 csv/jsonl |
 | `metric` | 是 | - | `cohen` / `fleiss` / `krippendorff_nominal` / `pairwise_agreement` |
 | `pair` | 否 | 无 | 仅 `cohen` 可用；必须恰好两人 |
 | `multi_label` | 否 | `false` | 数组标签按标签二值化后分别计算 |
@@ -124,6 +125,30 @@ A04,it_0001,
 | `strict` | 否 | `false` | 为 `true` 时把所有 warning 提升为 error |
 
 示例：见 `configs/demo.yaml` 与 `configs/strict.yaml`。字段名未知、类型错误、未知指标、阈值越界、标签为空或重复、pair 不在白名单等都会给出稳定错误码和字段路径。
+
+### 分配模式与覆盖审计
+
+同一批次可能要求每位标注人标注全部条目（全量分配），也可能只把部分条目派给某人（分片分配）。工具按以下三种明确模式确定「预期的人-条目组合」，模式选择只改变覆盖审计结果，不改变实有标注的指标分母与共识票数：
+
+| 模式 | 触发条件 | 预期组合来源 | 缺席推断 |
+| --- | --- | --- | --- |
+| `manifest` | 配置了 `assignment_manifest` | 清单逐行声明，是唯一权威 | 按清单逐对核对 |
+| `full` | 未配置清单，但显式配置了 `annotators` | 白名单 × 本批数据中实际出现的 item 集合 | 可由名单与 item 集合推导 |
+| `discovery` | 既无清单也无白名单 | 不建立预期集合 | 不臆测任何缺席组合 |
+
+清单文件每行一个预期组合。CSV 必须含 `annotator_id`、`item_id` 两列（允许额外列、跳过空行）；JSONL 每行是含这两个字段的对象。校验时把数据与预期组合对账，区分四种状态：
+
+1. **已提交标签**：组合在清单内且数据中有非空标签；
+2. **显式空标签**：组合在清单内但数据行 label 为空，仍报 `EMPTY_LABEL`，不计入缺席；
+3. **已分配但无记录（缺席）**：组合在预期集合内但数据中完全没有行，报 `ASSIGNMENT_MISSING`（warning，带 item 与 annotator 身份，strict 下提升为阻断）；
+4. **未分配却出现记录（越界）**：仅 manifest 模式，数据行的组合不在清单内，报 `UNASSIGNED_ANNOTATION`（error）。
+
+关键口径：
+
+- manifest 模式下，数据中出现但不在清单数据范围内的 item 不会被误报为「未提交」，其行按越界处理；清单中声明但数据完全没有的 item 仍按缺席核对。
+- 缺席记录参与覆盖率与 strict 阻断判断，但不会伪造成标注行，不进入 `build_items`、一致性指标分母或共识票数。
+- 清单本身的重复组合（`ASSIGNMENT_DUPLICATE_PAIR`）、清单标注人与白名单冲突（`ASSIGNMENT_UNKNOWN_ANNOTATOR`）、清单坏行（`ASSIGNMENT_MALFORMED_ROW`）都是带行号定位的 error；文件缺失、编码错误、表头错误按文件级 `DataError` 阻断。
+- 覆盖统计（预期组合数、已提交、显式空标签、完成数、缺席数、越界记录数、覆盖率/完成率）写入报告 `assignment_coverage` 段；discovery 模式不产出覆盖审计段。
 
 ## 5. 度量口径与中间量
 
@@ -211,6 +236,7 @@ alpha = 1 - Do / De
 | `CFG_DUPLICATE_LABEL` | 标签重复 |
 | `CFG_DUPLICATE_ANNOTATOR` | 白名单标注人重复 |
 | `CFG_PAIR_INVALID` | pair 配置不合法或只用于 cohen |
+| `CFG_ASSIGNMENT_FORMAT` | 分配清单格式不是 csv/jsonl |
 
 ### 数据加载与校验
 
@@ -230,6 +256,12 @@ alpha = 1 - Do / De
 | `EMPTY_LABEL` | warning | 空标签按缺失处理 |
 | `INSUFFICIENT_ANNOTATORS` | warning | 条目非空标注人数低于下限 |
 | `INVALID_CONFIDENCE` | warning | confidence 非数字或越界，按缺失处理 |
+| `ASSIGNMENT_MISSING` | warning | 已分配的人-条目组合在数据中完全无记录（缺席），附 item 与 annotator |
+| `UNASSIGNED_ANNOTATION` | error | 仅 manifest 模式：记录的人-条目组合未在分配清单中声明（越界） |
+| `ASSIGNMENT_DUPLICATE_PAIR` | error | 分配清单中同一人-条目组合重复声明，附清单行号 |
+| `ASSIGNMENT_UNKNOWN_ANNOTATOR` | error | 分配清单标注人不在 `annotators` 白名单，附清单行号 |
+| `ASSIGNMENT_MALFORMED_ROW` | error | 分配清单行结构异常或缺 ID，附清单行号 |
+| `ASSIGNMENT_FILE_NOT_FOUND` / `ASSIGNMENT_ENCODING` / `ASSIGNMENT_READ_ERROR` / `ASSIGNMENT_HEADER` | 阻断 | 分配清单文件缺失、编码失败、读取失败或表头缺列/重复 |
 
 `strict: true` 会把所有 warning 的级别改为 error 并标记 `promoted: true`，从而阻断运行。
 
@@ -270,6 +302,7 @@ alpha = 1 - Do / De
 - `config`：方案摘要与方案指纹；
 - `data`：文件 SHA-256、有效记录数、标注人指纹、条目数；
 - `validation`：状态、error/warning/promoted 计数与逐条发现；
+- `assignment_coverage`：分配模式（manifest/full）、清单路径与 SHA-256、预期/已提交/显式空标签/完成/缺席/越界组合数、覆盖率与完成率，以及逐条分配类发现；discovery 模式下为 `null`；
 - `metrics`：主指标值、po/pe/Do/De、有效条目/标注、per-label 与宏平均；
 - `review_queue`：争议条目、票数分布、得票率、理由码、open/resolved 状态；
 - `annotators`：一致率、参与条目、可比较条目、缺失、越界、outlier 标记；
@@ -292,17 +325,20 @@ alpha = 1 - Do / De
 
 ### SQLite 台账
 
-默认 `var/tagconsensus.db`，七张表：
+默认 `var/tagconsensus.db`，八张表：
 
 | 表 | 主要内容 |
 | --- | --- |
 | `runs` | run_id、时间、方案/数据指纹、主指标、结论、报告路径 |
-| `validation_findings` | 逐条 error/warning、行号、是否由 strict 提升 |
+| `validation_findings` | 逐条 error/warning、行号、item 与 annotator 身份、是否由 strict 提升 |
+| `assignment_coverage` | 分配模式、清单指纹、预期/提交/空标签/缺席/越界计数、覆盖率与完成率 |
 | `metrics` | 主指标与 per-label 中间量 |
 | `review_queue` | 条目、理由、票数、得票率、解决状态 |
 | `annotators` | 一致率、参与量、缺失/越界、outlier 标记 |
 | `adjudications` | 裁决标签、复核人、理由、采纳标记 |
 | `artifacts` | 文件名、绝对路径、字节数、SHA-256 |
+
+`assignment_coverage` 仅在 manifest/full 模式写入；分配类 finding 仍统一落在 `validation_findings` 中，并在 Web 的 `/review` 与 `/ledger` 页面的「分配覆盖审计」区域展示。
 
 ```bash
 python -m tagconsensus history --db var/tagconsensus.db
@@ -342,6 +378,8 @@ tagconsensus/
     config.py
     models.py
     loader.py
+    manifest.py
+    assignment.py
     validate.py
     metrics.py
     items.py
@@ -363,6 +401,10 @@ tagconsensus/
     test_config.py
     test_loader.py
     test_validate.py
+    test_assignment.py
+    test_assignment_manifest.py
+    test_assignment_loading.py
+    test_assignment_integration.py
     test_metrics_nominal.py
     test_metrics_edge.py
     test_items.py
@@ -388,10 +430,11 @@ pytest --cov=tagconsensus --cov-report=term-missing
 - 完全一致、随机一致、单条目、全缺失、Fleiss 人数不齐、pe == 1、空文件、仅表头；
 - CSV/JSONL、utf-8-sig、gbk、多标签数组、重复标注、越界标签、精确行号；
 - 平票、阈值边界、裁决优先、重复裁决、裁决标签越界；
+- 分配覆盖三种模式（manifest/full/discovery）、四态对账（已提交/显式空标签/缺席/越界）、清单重复与白名单冲突、清单坏行与文件级错误、strict 提升、模式改变覆盖审计但不改变指标；
 - 两次运行报告剔除时间字段和 run_id 后完全一致；
 - Web 空状态、正常渲染、查询白名单、nosniff、无公开监听地址、无外部资源引用。
 
-当前测试数为 102，全部通过，无 skip。核心度量与裁决模块覆盖率高于 85%。
+当前测试数为 133，全部通过，无 skip。核心度量与裁决模块覆盖率高于 85%。
 
 ## 11. 验收结果
 
@@ -468,10 +511,10 @@ $ grep -RIn -E '0\.0\.0\.0|https?://' .
 
 ```text
 $ find . -name "*.py" -not -path "./.pytest_cache/*" -print0 | xargs -0 wc -l | tail -1
-3986 total
+5297 total
 ```
 
-全部 Python 文件单文件不超过 300 行，最大 278 行；总行数处于 2500–4500 行区间。最终统计见交付说明。
+全部 Python 文件单文件不超过 300 行，最大 297 行。最终统计见交付说明。
 
 ### 7) 报告确定性
 

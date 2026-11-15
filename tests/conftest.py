@@ -41,6 +41,7 @@ def make_config(
     adjudication_file: Path | None = None,
     db_path: Path | None = None,
     output_dir: Path | None = None,
+    assignment_manifest: Path | str | dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Path:
     data_path = data_path or (tmp_path / "data.csv")
@@ -61,10 +62,22 @@ def make_config(
     }
     if adjudication_file is not None:
         payload["adjudication_file"] = str(adjudication_file)
+    if assignment_manifest is not None:
+        if isinstance(assignment_manifest, Path):
+            payload["assignment_manifest"] = str(assignment_manifest)
+        else:
+            payload["assignment_manifest"] = assignment_manifest
     if extra:
         payload.update(extra)
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def write_manifest_csv(path: Path, pairs: list[tuple[str, str]]) -> Path:
+    lines = ["annotator_id,item_id"]
+    lines.extend(f"{annotator_id},{item_id}" for annotator_id, item_id in pairs)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 
