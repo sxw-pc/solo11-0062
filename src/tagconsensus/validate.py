@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 from .config import Config
-from .models import Annotation, Dataset, ValidationFinding
+from .models import RecordSource, ValidationFinding
 
 SEVERITY_ORDER = {"error": 0, "warning": 1}
 
@@ -51,17 +50,18 @@ def _sort_key(finding: ValidationFinding) -> tuple:
     )
 
 
-def _duplicate_findings(annotations: Iterable[Annotation]) -> list[ValidationFinding]:
-    grouped: dict[tuple[str, str], list[Annotation]] = {}
-    for row in annotations:
-        grouped.setdefault((row.annotator_id, row.item_id), []).append(row)
+def _duplicate_findings(source: RecordSource) -> list[ValidationFinding]:
+    """Global duplicate findings from the whole-file key index.
+
+    The source groups repeated ``(annotator_id, item_id)`` keys across the
+    entire input (in-memory dict or SQLite index), so repeats separated by many
+    batches are still found and every duplicate carries the first occurrence's
+    line number.
+    """
     findings: list[ValidationFinding] = []
-    for (annotator_id, item_id), rows in sorted(grouped.items()):
-        if len(rows) < 2:
-            continue
-        ordered = sorted(rows, key=lambda row: row.line_no)
-        first_line = ordered[0].line_no
-        for duplicate in ordered[1:]:
+    for (annotator_id, item_id), line_numbers in source.iter_duplicate_groups():
+        first_line = line_numbers[0]
+        for duplicate_line in line_numbers[1:]:
             findings.append(
                 ValidationFinding(
                     "DUPLICATE_ANNOTATION",
@@ -69,26 +69,26 @@ def _duplicate_findings(annotations: Iterable[Annotation]) -> list[ValidationFin
                     f"duplicate annotation for {annotator_id}/{item_id}; first at line {first_line}",
                     item_id=item_id,
                     annotator_id=annotator_id,
-                    line_no=duplicate.line_no,
+                    line_no=duplicate_line,
                 )
             )
     return findings
 
 
-def validate_dataset(dataset: Dataset, config: Config) -> ValidationResult:
-    findings: list[ValidationFinding] = list(dataset.parse_findings)
-    findings.extend(_duplicate_findings(dataset.annotations))
-    if dataset.records == 0:
+def validate_dataset(source: RecordSource, config: Config) -> ValidationResult:
+    findings: list[ValidationFinding] = list(source.iter_parse_findings())
+    findings.extend(_duplicate_findings(source))
+    if source.records == 0:
         findings.append(
             ValidationFinding("DATA_EMPTY", "error", "dataset contains no valid records")
         )
 
     allowed_labels = set(config.label_space)
     allowed_annotators = set(config.annotators)
-    labels_by_item: dict[str, int] = {item_id: 0 for item_id in dataset.item_ids}
+    labels_by_item: dict[str, int] = {item_id: 0 for item_id in source.item_ids}
     unknown_seen: set[str] = set()
 
-    for row in dataset.annotations:
+    for row in source.iter_annotations():
         if row.is_missing:
             findings.append(
                 ValidationFinding(

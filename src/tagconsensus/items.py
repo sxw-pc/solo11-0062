@@ -10,18 +10,18 @@ from .errors import MetricError
 from .metrics import compute_metric
 from .models import (
     AnnotatorStat,
-    Dataset,
     ItemConsensus,
     LeaveOneOut,
     MetricResult,
+    RecordSource,
     sorted_counts,
 )
 
 
-def build_items(dataset: Dataset, config: Config) -> list[ItemConsensus]:
-    buckets: dict[str, Counter[str]] = {item_id: Counter() for item_id in dataset.item_ids}
+def build_items(source: RecordSource, config: Config) -> list[ItemConsensus]:
+    buckets: dict[str, Counter[str]] = {item_id: Counter() for item_id in source.item_ids}
     counts: Counter[str] = Counter()
-    for row in dataset.annotations:
+    for row in source.iter_annotations():
         counts[row.item_id] += 0 if row.is_missing else 1
         for label in row.labels:
             buckets[row.item_id][label] += 1
@@ -95,11 +95,11 @@ def majority_reference(item: ItemConsensus, config: Config) -> tuple[str, ...] |
 
 
 def annotator_stats(
-    dataset: Dataset, config: Config, items: Iterable[ItemConsensus]
+    source: RecordSource, config: Config, items: Iterable[ItemConsensus]
 ) -> list[AnnotatorStat]:
     item_map = {item.item_id: item for item in items}
-    rows: dict[str, list] = {annotator: [] for annotator in dataset.annotators}
-    for row in dataset.annotations:
+    rows: dict[str, list] = {annotator: [] for annotator in source.annotators}
+    for row in source.iter_annotations():
         rows[row.annotator_id].append(row)
     allowed = set(config.label_space)
     results: list[AnnotatorStat] = []
@@ -149,12 +149,12 @@ def review_queue(items: Iterable[ItemConsensus]) -> list[dict]:
 
 
 def leave_one_out(
-    dataset: Dataset, config: Config, baseline: MetricResult
+    source: RecordSource, config: Config, baseline: MetricResult
 ) -> list[LeaveOneOut]:
     results: list[LeaveOneOut] = []
-    for annotator_id in dataset.annotators:
+    for annotator_id in source.annotators:
         try:
-            result = compute_metric(dataset.without_annotator(annotator_id), config)
+            result = compute_metric(source.without_annotator(annotator_id), config)
             delta = result.value - baseline.value
             results.append(LeaveOneOut(annotator_id, result.value, delta, None))
         except MetricError as exc:

@@ -13,10 +13,10 @@ from .report_html import render_html
 from .models import (
     AnnotatorStat,
     ConsensusRecord,
-    Dataset,
     ItemConsensus,
     LeaveOneOut,
     MetricResult,
+    RecordSource,
 )
 from .validate import ValidationResult
 
@@ -61,7 +61,7 @@ def _conclusion(
 
 
 def build_report(
-    *, config: Config, dataset: Dataset, validation: ValidationResult,
+    *, config: Config, dataset: RecordSource, validation: ValidationResult,
     run_id: str, started_at: str, completed_at: str,
     metric: MetricResult | None = None, items: Iterable[ItemConsensus] = (),
     annotators: Iterable[AnnotatorStat] = (), leave_one_out: Iterable[LeaveOneOut] = (),

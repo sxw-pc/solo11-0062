@@ -308,6 +308,15 @@ alpha = 1 - Do / De
 python -m tagconsensus history --db var/tagconsensus.db
 ```
 
+### 有界内存读取与临时暂存
+
+大批量 CSV / JSONL 输入走 `staging.py` 的有界内存路径，不再一次性 `read_bytes` + 全量解码：
+
+- `loader.py` 以固定大小（默认 1 MiB）二进制块增量解码，按物理行边界切分；CRLF 跨行块、引号内换行、GBK 多字节字符被拆开、UTF-8-SIG BOM 都与内存路径保持同一行号，SHA-256 随读随算且与整文件哈希一致。
+- 规范化后的记录与解析 finding 批量写入一个**私有临时目录**里的 SQLite 暂存库，并对 `(annotator_id, item_id, line_no)` 建全局键索引；重复键即使相隔很多批也能在全文件范围内识别，首次/重复行号与逐行内存聚合一致。
+- 全部写入处于同一事务：暂存失败即回滚并只删除本次唯一命名的临时目录，已解析前缀不会作为完整数据集暴露，也不会触碰任何用户文件；输入行格式错误时诊断保留全部行，但 `validate` 阻断使 `metrics` 不会消费该记录集。
+- `StagedDataset` 与内存 `Dataset` 实现同一 `RecordSource` 接口，所有查询按物理行号排序，因此校验结论、指标、条目与报告逐项等价。原 `load_dataset` 内存路径保留可用。
+
 ## 8. 可复现性
 
 - 同一输入、同一方案、同一目录重复运行，报告正文除 `run_id`、`started_at`、`completed_at` 外完全一致。
@@ -342,6 +351,7 @@ tagconsensus/
     config.py
     models.py
     loader.py
+    staging.py
     validate.py
     metrics.py
     items.py
@@ -362,6 +372,7 @@ tagconsensus/
     conftest.py
     test_config.py
     test_loader.py
+    test_staging.py
     test_validate.py
     test_metrics_nominal.py
     test_metrics_edge.py

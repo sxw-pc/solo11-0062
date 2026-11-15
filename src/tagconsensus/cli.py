@@ -14,10 +14,10 @@ from .config import Config, load_config
 from .errors import TagConsensusError
 from .items import annotator_stats, build_items, leave_one_out
 from .ledger import list_runs, record_run
-from .loader import load_dataset
 from .metrics import compute_metric
-from .models import Adjudication, ConsensusRecord, Dataset
+from .models import Adjudication, ConsensusRecord, RecordSource
 from .report import build_report, write_consensus, write_reports
+from .staging import stage_dataset
 from .validate import ValidationResult, validate_dataset
 
 
@@ -34,7 +34,7 @@ def _decision_records(adjudications: list[Adjudication]) -> list[dict[str, Any]]
 
 
 def _persist(
-    config: Config, dataset: Dataset, validation: ValidationResult, report: dict,
+    config: Config, dataset: RecordSource, validation: ValidationResult, report: dict,
     consensus: list[ConsensusRecord],
 ) -> None:
     artifacts = write_reports(report, config.output_dir)
@@ -43,7 +43,7 @@ def _persist(
 
 
 def _blocked(
-    *, config: Config, dataset: Dataset, validation: ValidationResult,
+    *, config: Config, dataset: RecordSource, validation: ValidationResult,
     run_id: str, started_at: str, error: dict | None, metric=None,
 ) -> int:
     report = build_report(
@@ -60,38 +60,43 @@ def _blocked(
 def run_demo(config_path: str) -> int:
     started_at = _now()
     config = load_config(config_path)
-    dataset = load_dataset(config.dataset)
-    validation = validate_dataset(dataset, config)
-    run_id = uuid.uuid4().hex
-    if validation.blocked:
-        return _blocked(config=config, dataset=dataset, validation=validation,
-                        run_id=run_id, started_at=started_at, error=None)
-    try:
-        decisions = load_adjudications(
-            config.adjudication_file, config, dataset.item_ids
+    # Bounded-memory ingestion: normalized rows spill to a private temporary
+    # SQLite stage, so a large input never requires holding the full decoded
+    # file in memory. The stage (and only it) is removed when the block exits;
+    # any staging failure raises before any validation or metric runs, so a
+    # partially parsed prefix can never be treated as a complete dataset.
+    with stage_dataset(config.dataset) as dataset:
+        validation = validate_dataset(dataset, config)
+        run_id = uuid.uuid4().hex
+        if validation.blocked:
+            return _blocked(config=config, dataset=dataset, validation=validation,
+                            run_id=run_id, started_at=started_at, error=None)
+        try:
+            decisions = load_adjudications(
+                config.adjudication_file, config, dataset.item_ids
+            )
+            metric = compute_metric(dataset, config)
+            items = build_items(dataset, config)
+            stats = annotator_stats(dataset, config, items)
+            influence = leave_one_out(dataset, config, metric)
+            consensus = apply_adjudications(items, decisions)
+        except TagConsensusError as exc:
+            return _blocked(config=config, dataset=dataset, validation=validation,
+                            run_id=run_id, started_at=started_at, error=exc.as_dict())
+        report = build_report(
+            config=config, dataset=dataset, validation=validation, run_id=run_id,
+            started_at=started_at, completed_at=_now(), metric=metric, items=items,
+            annotators=stats, leave_one_out=influence,
+            adjudications=_decision_records(decisions), consensus=consensus,
         )
-        metric = compute_metric(dataset, config)
-        items = build_items(dataset, config)
-        stats = annotator_stats(dataset, config, items)
-        influence = leave_one_out(dataset, config, metric)
-        consensus = apply_adjudications(items, decisions)
-    except TagConsensusError as exc:
-        return _blocked(config=config, dataset=dataset, validation=validation,
-                        run_id=run_id, started_at=started_at, error=exc.as_dict())
-    report = build_report(
-        config=config, dataset=dataset, validation=validation, run_id=run_id,
-        started_at=started_at, completed_at=_now(), metric=metric, items=items,
-        annotators=stats, leave_one_out=influence,
-        adjudications=_decision_records(decisions), consensus=consensus,
-    )
-    _persist(config, dataset, validation, report, consensus)
-    print(f"run_id={run_id} conclusion={report['conclusion']['label']} "
-          f"metric={metric.name} value={metric.value:.12g}")
-    print(f"records={dataset.records} items={len(dataset.item_ids)} "
-          f"review={len(report['review_queue'])} "
-          f"adjudicated={report['consensus']['source_counts']['adjudicated']}")
-    print(f"output={config.output_dir}")
-    return 0
+        _persist(config, dataset, validation, report, consensus)
+        print(f"run_id={run_id} conclusion={report['conclusion']['label']} "
+              f"metric={metric.name} value={metric.value:.12g}")
+        print(f"records={dataset.records} items={len(dataset.item_ids)} "
+              f"review={len(report['review_queue'])} "
+              f"adjudicated={report['consensus']['source_counts']['adjudicated']}")
+        print(f"output={config.output_dir}")
+        return 0
 
 
 def run_history(db_path: str) -> int:

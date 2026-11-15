@@ -3,11 +3,58 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping, Protocol, runtime_checkable
 
 from .hashing import annotator_fingerprint, sha256_text, stable_json
 
 REVIEW_REASONS = ("INSUFFICIENT_ANNOTATORS", "TIE", "LOW_CONSENSUS")
+
+
+@runtime_checkable
+class RecordSource(Protocol):
+    """Common surface of the in-memory ``Dataset`` and the disk-backed staged view.
+
+    Downstream stages (validation, metrics, per-item consensus) consume records
+    through this interface instead of holding a full tuple, so a large input can
+    be streamed from temporary storage with bounded memory. Iteration order is
+    always physical line order so line-number diagnostics stay identical to the
+    in-memory path.
+    """
+
+    @property
+    def records(self) -> int: ...
+
+    @property
+    def item_ids(self) -> tuple[str, ...]: ...
+
+    @property
+    def annotators(self) -> tuple[str, ...]: ...
+
+    @property
+    def missing_annotations(self) -> int: ...
+
+    @property
+    def source_path(self) -> str: ...
+
+    @property
+    def file_format(self) -> str: ...
+
+    @property
+    def file_sha256(self) -> str: ...
+
+    def iter_annotations(self) -> Iterator[Annotation]: ...
+
+    def iter_parse_findings(self) -> Iterator[ValidationFinding]: ...
+
+    def iter_duplicate_groups(
+        self,
+    ) -> Iterator[tuple[tuple[str, str], list[int]]]: ...
+
+    def without_annotator(self, annotator_id: str) -> "RecordSource": ...
+
+    def fingerprint_dict(self) -> dict[str, Any]: ...
+
+    def fingerprint(self) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -56,6 +103,28 @@ class Dataset:
     @property
     def records(self) -> int:
         return len(self.annotations)
+
+    def iter_annotations(self) -> Iterator[Annotation]:
+        return iter(self.annotations)
+
+    def iter_parse_findings(self) -> Iterator[ValidationFinding]:
+        return iter(self.parse_findings)
+
+    def iter_duplicate_groups(
+        self,
+    ) -> Iterator[tuple[tuple[str, str], list[int]]]:
+        """Yield ((annotator_id, item_id), line numbers) for repeated keys.
+
+        Groups and line numbers within a group are ordered exactly like the
+        validation stage's global aggregation; singleton groups are skipped.
+        """
+        grouped: dict[tuple[str, str], list[Annotation]] = {}
+        for row in self.annotations:
+            grouped.setdefault((row.annotator_id, row.item_id), []).append(row)
+        for key, rows in sorted(grouped.items()):
+            if len(rows) < 2:
+                continue
+            yield key, sorted(row.line_no for row in rows)
 
     @property
     def item_ids(self) -> tuple[str, ...]:

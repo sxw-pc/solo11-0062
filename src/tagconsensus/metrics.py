@@ -7,26 +7,26 @@ from typing import Hashable, Iterable, Sequence
 
 from .config import Config
 from .errors import MetricError
-from .models import Dataset, LabelMetric, MetricResult
+from .models import LabelMetric, MetricResult, RecordSource
 
 EPSILON = 1e-12
 
 
-def _items(dataset: Dataset) -> list[str]:
-    return list(dataset.item_ids)
+def _items(source: RecordSource) -> list[str]:
+    return list(source.item_ids)
 
 
-def _single_units(dataset: Dataset) -> list[Counter[str]]:
-    buckets: dict[str, Counter[str]] = {item_id: Counter() for item_id in _items(dataset)}
-    for row in dataset.annotations:
+def _single_units(source: RecordSource) -> list[Counter[str]]:
+    buckets: dict[str, Counter[str]] = {item_id: Counter() for item_id in _items(source)}
+    for row in source.iter_annotations():
         if not row.is_missing:
             buckets[row.item_id][row.labels[0]] += 1
     return [buckets[item_id] for item_id in sorted(buckets)]
 
 
-def _binary_units(dataset: Dataset, label: str) -> list[Counter[int]]:
-    buckets: dict[str, Counter[int]] = {item_id: Counter() for item_id in _items(dataset)}
-    for row in dataset.annotations:
+def _binary_units(source: RecordSource, label: str) -> list[Counter[int]]:
+    buckets: dict[str, Counter[int]] = {item_id: Counter() for item_id in _items(source)}
+    for row in source.iter_annotations():
         if row.is_missing:
             continue
         value = 1 if label in row.labels else 0
@@ -144,9 +144,9 @@ def _krippendorff(units: list[Counter]) -> LabelMetric:
 
 
 def _cohen_pairs(
-    dataset: Dataset, config: Config, label: str | None
+    source: RecordSource, config: Config, label: str | None
 ) -> list[tuple[Hashable, Hashable]]:
-    annotators = set(dataset.annotators)
+    annotators = set(source.annotators)
     if config.pair is not None:
         pair = config.pair
         if any(name not in annotators for name in pair):
@@ -154,13 +154,13 @@ def _cohen_pairs(
                 "METRIC_ANNOTATOR_COUNT", "pair contains an annotator absent from the data"
             )
     else:
-        if len(dataset.annotators) != 2:
+        if len(annotators) != 2:
             raise MetricError(
                 "METRIC_ANNOTATOR_COUNT", "cohen requires exactly two annotators or a pair"
             )
-        pair = (dataset.annotators[0], dataset.annotators[1])
+        pair = (source.annotators[0], source.annotators[1])
     maps: dict[str, dict[str, Hashable]] = {pair[0]: {}, pair[1]: {}}
-    for row in dataset.annotations:
+    for row in source.iter_annotations():
         if row.annotator_id not in maps or row.is_missing:
             continue
         value = row.labels[0] if label is None else _binary_value(row.labels, label)
@@ -171,17 +171,17 @@ def _cohen_pairs(
     ]
 
 
-def _compute_one(dataset: Dataset, config: Config, label: str | None) -> LabelMetric:
+def _compute_one(source: RecordSource, config: Config, label: str | None) -> LabelMetric:
     if config.metric == "cohen":
-        result = _cohen(_cohen_pairs(dataset, config, label))
+        result = _cohen(_cohen_pairs(source, config, label))
     elif config.metric == "fleiss":
-        units = _single_units(dataset) if label is None else _binary_units(dataset, label)
+        units = _single_units(source) if label is None else _binary_units(source, label)
         result = _fleiss(units)
     elif config.metric == "krippendorff_nominal":
-        units = _single_units(dataset) if label is None else _binary_units(dataset, label)
+        units = _single_units(source) if label is None else _binary_units(source, label)
         result = _krippendorff(units)
     elif config.metric == "pairwise_agreement":
-        units = _single_units(dataset) if label is None else _binary_units(dataset, label)
+        units = _single_units(source) if label is None else _binary_units(source, label)
         result = _pairwise(units)
     else:
         raise MetricError("METRIC_UNKNOWN", f"unsupported metric {config.metric}")
@@ -196,9 +196,9 @@ def _mean(values: Iterable[float | None]) -> float | None:
     return sum(present) / len(present) if present else None
 
 
-def compute_metric(dataset: Dataset, config: Config) -> MetricResult:
+def compute_metric(source: RecordSource, config: Config) -> MetricResult:
     if not config.multi_label:
-        result = _compute_one(dataset, config, None)
+        result = _compute_one(source, config, None)
         return MetricResult(
             config.metric, result.value, result.po, result.pe, result.do, result.de,
             result.eligible_items, result.eligible_annotations
@@ -207,15 +207,17 @@ def compute_metric(dataset: Dataset, config: Config) -> MetricResult:
     per_label: list[LabelMetric] = []
     for label in config.label_space:
         try:
-            per_label.append(_compute_one(dataset, config, label))
+            per_label.append(_compute_one(source, config, label))
         except MetricError as exc:
             per_label.append(LabelMetric(label, None, error_code=exc.code))
     valid = [entry for entry in per_label if entry.value is not None]
     if not valid:
         raise MetricError("METRIC_ALL_LABELS_INVALID", "no label produced a usable metric")
     macro = sum(entry.value for entry in valid if entry.value is not None) / len(valid)
-    eligible_items = len(dataset.item_ids)
-    eligible_annotations = sum(1 for row in dataset.annotations if not row.is_missing)
+    eligible_items = len(source.item_ids)
+    eligible_annotations = sum(
+        1 for row in source.iter_annotations() if not row.is_missing
+    )
     return MetricResult(
         config.metric,
         macro,
