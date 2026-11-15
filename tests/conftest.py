@@ -80,6 +80,42 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]], encoding: str = "utf-8")
     return path
 
 
+def bind_decisions(
+    rows: list[tuple[str, str, str, str]],
+    config: Config,
+    dataset: Dataset,
+) -> list[dict[str, Any]]:
+    """Build decision rows with current per-item and plan evidence bound."""
+    from tagconsensus.adjudicate import build_evidence_basis
+
+    basis = build_evidence_basis(dataset, config)
+    bound = []
+    for item_id, label, reviewer, reason in rows:
+        bound.append({
+            "item_id": item_id,
+            "decision_label": label,
+            "reviewer": reviewer,
+            "reason": reason,
+            "evidence": {
+                "binding_schema_version": basis.binding_schema_version,
+                "binding_scope": basis.binding_scope,
+                "item": {
+                    "summary": basis.item_evidence[item_id],
+                    "fingerprint": basis.item_fingerprints[item_id],
+                },
+                "scheme": {
+                    "fields": [
+                        "label_space", "multi_label",
+                        "min_annotators_per_item", "review_threshold",
+                    ],
+                    "summary": basis.scheme_summary,
+                    "fingerprint": basis.scheme_fingerprint,
+                },
+            },
+        })
+    return bound
+
+
 @pytest.fixture
 def demo_rows() -> list[tuple[str, str, str]]:
     return [

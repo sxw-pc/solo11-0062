@@ -1,7 +1,10 @@
-.PHONY: install demo test serve history strict clean
+.PHONY: install bind demo test serve history strict clean
 
 install:
 	python -m pip install -e ".[test]"
+
+bind:
+	python -m tagconsensus bind-adjudication --config configs/demo.yaml
 
 demo:
 	python -m tagconsensus demo --config configs/demo.yaml

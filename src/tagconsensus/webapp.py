@@ -13,6 +13,9 @@ from .ledger import get_run, latest_run, list_runs
 from .models import REVIEW_REASONS
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Review-queue reason codes include the per-item consensus reasons and the
+# adjudication-binding re-review marker.
+REVIEW_REASON_CODES = REVIEW_REASONS + ("ADJUDICATION_STALE",)
 ALLOWED_QUERIES = {"overview": set(), "review": {"reason"}, "ledger": {"run_id"}}
 
 
@@ -71,7 +74,7 @@ def create_app(db_path: str) -> Flask:
         if not _allowed_query("review"):
             abort(400, "unknown query parameter")
         reason = request.args.get("reason", "")
-        if reason and reason not in REVIEW_REASONS:
+        if reason and reason not in REVIEW_REASON_CODES:
             abort(400, "unknown reason code")
         latest = latest_run(Path(db_path))
         detail = get_run(Path(db_path), latest["run_id"]) if latest else None
@@ -85,7 +88,7 @@ def create_app(db_path: str) -> Flask:
             ]
         return render_template(
             "review.html", latest=latest, detail=detail, entries=entries,
-            reason=reason, reasons=REVIEW_REASONS,
+            reason=reason, reasons=REVIEW_REASON_CODES,
         )
 
     @app.get("/ledger")

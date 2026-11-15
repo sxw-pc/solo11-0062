@@ -36,7 +36,7 @@
         {% if entries %}
           <table>
             <thead>
-              <tr><th>条目</th><th>首要理由</th><th>全部理由</th><th>票数分布</th><th>得票率</th><th>状态</th></tr>
+              <tr><th>条目</th><th>首要理由</th><th>全部理由</th><th>票数分布</th><th>得票率</th><th>状态</th><th>裁决失效依据</th></tr>
             </thead>
             <tbody>
               {% for item in entries %}
@@ -51,6 +51,11 @@
                   </td>
                   <td>{{ "%.6g"|format(item.vote_rate) if item.vote_rate is not none else "-" }}</td>
                   <td>{{ item.status or "-" }}</td>
+                  <td>
+                    {% if item.status == "stale" %}
+                      <code>{{ item.reason }} · 需重新核验裁决</code>
+                    {% else %}-{% endif %}
+                  </td>
                 </tr>
               {% endfor %}
             </tbody>

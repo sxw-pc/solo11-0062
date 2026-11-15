@@ -24,6 +24,17 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _evidence_fp(item: dict, block: str) -> str:
+    evidence = item.get("evidence")
+    if not isinstance(evidence, dict):
+        return "-"
+    section = evidence.get(block)
+    if not isinstance(section, dict):
+        return "-"
+    fingerprint = section.get("fingerprint")
+    return fingerprint if isinstance(fingerprint, str) else "-"
+
+
 def _html_table(headers: list[str], rows: Iterable[Iterable[Any]]) -> str:
     head = "".join(f"<th>{html.escape(str(item))}</th>" for item in headers)
     body = "".join("<tr>" + "".join(
@@ -70,10 +81,13 @@ def render_html(report: dict[str, Any]) -> str:
     parts.append("<h2>复核队列</h2>")
     if report["review_queue"]:
         parts.append(_html_table(
-            ["item", "reason", "status", "votes", "rate", "annotators"],
+            ["item", "reason", "status", "votes", "rate", "annotators",
+             "stale_reasons", "prior_decision"],
             [(item["item_id"], item["reason"], item["status"],
               json.dumps(item["vote_counts"], ensure_ascii=False, sort_keys=True),
-              item["vote_rate"], item["annotator_count"])
+              item["vote_rate"], item["annotator_count"],
+              ",".join(item.get("stale_reasons", [])) or "-",
+              item.get("prior_decision_label") or "-")
              for item in report["review_queue"]]))
     else:
         parts.append("<p>无。</p>")
@@ -89,13 +103,39 @@ def render_html(report: dict[str, Any]) -> str:
         _html_table(["annotator", "value_without", "delta", "error"],
                     [(item["annotator_id"], item["value"], item["delta"],
                       item["error_code"]) for item in report["leave_one_out"]]),
+        "<h2>裁决依据绑定</h2>",
+        _html_table(["field", "value"], [
+            ("scope", report["adjudication_binding"]["scope"] or "-"),
+            ("binding_schema_version",
+             report["adjudication_binding"]["binding_schema_version"] or "-"),
+            ("scheme_fields",
+             json.dumps(report["adjudication_binding"]["scheme_fields"],
+                        ensure_ascii=False)),
+            ("scheme_fingerprint",
+             report["adjudication_binding"]["scheme_fingerprint"] or "-"),
+            ("provided", report["adjudications"]["provided"]),
+            ("valid", report["adjudications"]["valid"]),
+            ("stale", report["adjudications"]["stale"]),
+            ("stale_reason_counts",
+             json.dumps(report["adjudications"]["stale_reason_counts"],
+                        ensure_ascii=False, sort_keys=True)),
+        ]),
         "<h2>裁决与共识</h2>",
-        f"<p>裁决 {report['adjudications']['provided']} 条，采纳 "
-        f"{report['adjudications']['adopted']} 条，解决复核 "
+        f"<p>裁决 {report['adjudications']['provided']} 条，有效（采纳） "
+        f"{report['adjudications']['valid']} 条，失效待重新核验 "
+        f"{report['adjudications']['stale']} 条，解决复核 "
         f"{report['adjudications']['resolved_review_items']} 条。共识来源：<code>"
         f"{html.escape(json.dumps(report['consensus']['source_counts'], sort_keys=True))}"
-        "</code>。</p>",
+        "</code>。失效裁决不覆盖当前多数结果，也不计为已解决。</p>",
     ])
+    if report["adjudications"]["items"]:
+        parts.append(_html_table(
+            ["item", "decision", "reviewer", "status", "stale_reasons",
+             "item_evidence", "scheme_evidence"],
+            [(item["item_id"], item["decision_label"], item["reviewer"],
+              item["status"], ",".join(item.get("stale_reasons", [])) or "-",
+              _evidence_fp(item, "item"), _evidence_fp(item, "scheme"))
+             for item in report["adjudications"]["items"]]))
     if report["error"]:
         parts.append(f"<h2>错误</h2><p><code>{html.escape(report['error']['code'])}</code> "
                      f"{html.escape(report['error']['message'])}</p>")

@@ -91,3 +91,53 @@ def test_two_runs_are_listed(tmp_path):
     assert len(runs) == 2
     assert {run["metric_name"] for run in runs} == {"pairwise_agreement"}
     assert latest_run(db_path)["run_id"] in {run["run_id"] for run in runs}
+
+
+def test_legacy_database_migrates_and_keeps_history_readable(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE runs (
+          run_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, completed_at TEXT,
+          config_path TEXT, config_fingerprint TEXT, data_sha256 TEXT,
+          data_records INTEGER, annotator_fingerprint TEXT, metric_name TEXT,
+          metric_value REAL, conclusion TEXT, conclusion_label TEXT,
+          validation_status TEXT, error_code TEXT, report_json_path TEXT,
+          report_md_path TEXT, report_html_path TEXT, consensus_path TEXT,
+          output_dir TEXT
+        );
+        CREATE TABLE adjudications (
+          run_id TEXT NOT NULL, item_id TEXT NOT NULL, decision_label TEXT,
+          reviewer TEXT, reason TEXT, adopted INTEGER,
+          PRIMARY KEY (run_id, item_id)
+        );
+        INSERT INTO runs (run_id, started_at)
+        VALUES ('legacy-run', '2026-01-01T00:00:00+00:00');
+        INSERT INTO adjudications
+        (run_id, item_id, decision_label, reviewer, reason, adopted)
+        VALUES ('legacy-run', 'it_1', 'topic_alpha', 'old_reviewer', 'old', 1);
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    # A fresh write (record_run always calls init_db first) migrates the
+    # legacy schema while preserving the historical rows.
+    from tagconsensus.ledger import init_db
+
+    init_db(db_path)
+    runs = list_runs(db_path)
+    assert len(runs) == 1
+    assert runs[0]["run_id"] == "legacy-run"
+    assert runs[0]["binding_scope"] is None
+    assert runs[0]["adjudications_valid"] == 0
+    detail = get_run(db_path, "legacy-run")
+    legacy = detail["adjudications"][0]
+    assert legacy["status"] is None
+    assert legacy["stale_reasons"] is None
+    assert legacy["item_evidence_fingerprint"] is None
+    assert legacy["decision_label"] == "topic_alpha"
+    assert legacy["reviewer"] == "old_reviewer"

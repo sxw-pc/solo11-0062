@@ -207,6 +207,13 @@ class Adjudication:
     reviewer: str
     reason: str
     line_no: int
+    evidence: dict[str, Any] | None = None
+    status: str = "valid"
+    stale_reasons: tuple[str, ...] = ()
+
+    @property
+    def is_valid(self) -> bool:
+        return self.status == "valid" and not self.stale_reasons
 
 
 @dataclass(frozen=True)
@@ -217,6 +224,11 @@ class ConsensusRecord:
     vote_rate: float | None
     review_reasons: tuple[str, ...]
     adjudicated_by: str | None = None
+    adjudication_status: str | None = None
+    stale_reasons: tuple[str, ...] = ()
+    prior_decision_label: str | None = None
+    prior_reviewer: str | None = None
+    prior_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -226,6 +238,11 @@ class ConsensusRecord:
             "vote_rate": self.vote_rate,
             "review_reasons": list(self.review_reasons),
             "adjudicated_by": self.adjudicated_by,
+            "adjudication_status": self.adjudication_status,
+            "stale_reasons": list(self.stale_reasons),
+            "prior_decision_label": self.prior_decision_label,
+            "prior_reviewer": self.prior_reviewer,
+            "prior_reason": self.prior_reason,
         }
 
 

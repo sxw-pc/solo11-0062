@@ -118,11 +118,15 @@
           <h2>裁决与产物</h2>
           {% if detail.adjudications %}
             <table>
-              <thead><tr><th>条目</th><th>裁决标签</th><th>复核人</th><th>理由</th><th>采纳</th></tr></thead>
+              <thead><tr><th>条目</th><th>裁决标签</th><th>复核人</th><th>理由</th><th>采纳</th><th>状态</th><th>失效依据</th><th>条目证据</th><th>方案证据</th></tr></thead>
               <tbody>
                 {% for item in detail.adjudications %}
                   <tr><td><code>{{ item.item_id }}</code></td><td>{{ item.decision_label }}</td>
-                    <td>{{ item.reviewer }}</td><td>{{ item.reason }}</td><td>{{ item.adopted }}</td></tr>
+                    <td>{{ item.reviewer }}</td><td>{{ item.reason }}</td><td>{{ item.adopted }}</td>
+                    <td>{{ item.status or "legacy" }}</td>
+                    <td>{{ item.stale_reasons or "-" }}</td>
+                    <td><code>{{ item.item_evidence_fingerprint or "-" }}</code></td>
+                    <td><code>{{ item.scheme_fingerprint or "-" }}</code></td></tr>
                 {% endfor %}
               </tbody>
             </table>

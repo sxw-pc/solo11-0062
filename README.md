@@ -29,13 +29,16 @@
 # 1. 安装（在仓库根目录）
 python -m pip install -e ".[test]"
 
-# 2. 跑完整演示，退出码应为 0
+# 2. 为裁决文件绑定当前条目证据与方案语义（裁决文件更新后重跑即可）
+python -m tagconsensus bind-adjudication --config configs/demo.yaml
+
+# 3. 跑完整演示，退出码应为 0
 python -m tagconsensus demo --config configs/demo.yaml
 
-# 3. 跑测试，全部通过
+# 4. 跑测试，全部通过
 pytest -q
 
-# 4. 启动本地只读服务
+# 5. 启动本地只读服务
 python -m tagconsensus serve --config configs/demo.yaml
 ```
 
@@ -244,17 +247,45 @@ alpha = 1 - Do / De
 | `METRIC_UNKNOWN` | 内部遇到未知指标 |
 | `METRIC_ALL_LABELS_INVALID` | 多标签模式下所有标签都退化 |
 
-### 裁决与台账
+### 裁决依据绑定（方案 B：按条目绑定）
+
+裁决不再只按 `item_id` 命中。每条裁决写入时必须绑定一份可验证依据，运行时先校验绑定再决定是否允许人工决定覆盖多数结果：
+
+- **条目证据**：该 `item_id` 下每一位标注人及其标签的完整摘要（含空标签缺失标注），经稳定 JSON 序列化后计算 SHA-256 指纹。某个条目的投票人或标签变化只使该条目的裁决失效，无关条目的变化不误伤其他决定。
+- **方案语义证据**：把所有会改变条目判定的方案字段——`label_space`、`multi_label`、`min_annotators_per_item`、`review_threshold`——组成摘要并计算 SHA-256 指纹。其中任一字段变化都会使全部已绑定裁决失效；`metric`、`pair`、`outlier_threshold`、`annotators`、输出路径等不参与条目判定，不进入绑定。
+- 绑定内含摘要原文与指纹，运行时重新计算指纹比对；改写摘要但不刷新指纹会被识别为 `ADJ_BINDING_TAMPERED`。
+
+绑定/重绑通过离线子命令完成，输出确定性、不联网：
+
+```bash
+python -m tagconsensus bind-adjudication --config configs/demo.yaml
+python -m tagconsensus bind-adjudication --config configs/demo.yaml --output path/to/bound.jsonl
+```
+
+校验后每条裁决只有两种状态：`valid`（依据仍对应当前标注证据与方案语义，可进入 `consensus.jsonl` 覆盖多数结果）或 `stale`（依据过期，待重新核验）。失效原因码：
+
+| 失效码 | 含义 |
+| --- | --- |
+| `ADJ_EVIDENCE_MISSING` | 裁决行缺少 `evidence` 绑定（历史无绑定文件） |
+| `ADJ_ITEM_EVIDENCE_CHANGED` | 该条目的投票人/标签摘要与绑定时不一致 |
+| `ADJ_SCHEME_CHANGED` | 影响判定的方案字段指纹与绑定时不一致 |
+| `ADJ_BINDING_TAMPERED` | 绑定结构缺失或内嵌摘要与指纹不自洽 |
+| `ADJ_LABEL_OUT_OF_SPACE` | 裁决标签已不在当前 `label_space` 中 |
+
+失效裁决**不会**静默降级成多数票，也**不会**被计为已解决：其共识记录 `source` 为 `adjudication_stale`、`labels` 为空，同时保留 `prior_decision_label`、`prior_reviewer`、`prior_reason` 与全部失效原因；该条目进入复核队列并把结论置为「需复核」。每次运行的控制台、`report.json`、`report.md`、`report.html` 与 SQLite 台账都会列出本次采用的绑定范围（`per_item`）、有效数、失效数及逐条失效依据。
+
+### 裁决与台账错误码
 
 | 错误码 | 含义 |
 | --- | --- |
 | `ADJ_FILE_NOT_FOUND` | 裁决文件不存在 |
 | `ADJ_READ_ERROR` | 裁决文件读取失败 |
-| `ADJ_MALFORMED_ROW` | 裁决行不是合法 JSON 对象 |
+| `ADJ_MALFORMED_ROW` | 裁决行不是合法 JSON 对象或绑定结构损坏 |
 | `ADJ_MISSING_FIELD` | 裁决缺少必填字段 |
 | `ADJ_UNKNOWN_ITEM` | 裁决指向不存在的条目 |
-| `ADJ_LABEL_OUT_OF_SPACE` | 裁决标签不在 `label_space` |
+| `ADJ_LABEL_OUT_OF_SPACE` | 无绑定裁决的标签不在 `label_space`（已绑定裁决改为失效而非报错） |
 | `ADJ_DUPLICATE_ITEM` | 同一条目重复裁决 |
+| `ADJ_OUTPUT_REQUIRED` | `bind-adjudication` 未配置裁决文件且未提供 `--output` |
 | `LEDGER_INIT` | 台账初始化失败 |
 | `LEDGER_WRITE` | 台账写入失败 |
 
@@ -274,9 +305,10 @@ alpha = 1 - Do / De
 - `review_queue`：争议条目、票数分布、得票率、理由码、open/resolved 状态；
 - `annotators`：一致率、参与条目、可比较条目、缺失、越界、outlier 标记；
 - `leave_one_out`：逐人移除后的值和 delta；
-- `adjudications`：裁决条数、采纳条数、解决复核条数、逐条明细；
+- `adjudication_binding`：绑定范围（`per_item`）、绑定结构版本、影响判定的方案字段、方案语义指纹与全部条目的证据指纹；
+- `adjudications`：裁决条数、有效/失效条数、逐条失效依据计数、逐条明细（含状态、失效原因与内嵌证据）；
 - `consensus`：来源统计和逐条共识记录；
-- `conclusion`：`pass` / `review` / `blocked` 及中文结论。
+- `conclusion`：`pass` / `review` / `blocked` 及中文结论；存在失效裁决时结论必为「需复核」。
 
 `report.md` 是同样内容的人读摘要。`report.html` 是自包含文件，CSS 内联在 `<style>` 中，不引用外部资源。
 
@@ -285,10 +317,10 @@ alpha = 1 - Do / De
 `consensus.jsonl` 按 `item_id` 升序写出全部条目：
 
 ```json
-{"adjudicated_by":null,"item_id":"it_0001","labels":["topic_alpha"],"review_reasons":[],"source":"majority","vote_rate":1.0}
+{"adjudicated_by":null,"adjudication_status":null,"item_id":"it_0001","labels":["topic_alpha"],"prior_decision_label":null,"prior_reason":null,"prior_reviewer":null,"review_reasons":[],"source":"majority","stale_reasons":[],"vote_rate":1.0}
 ```
 
-`source` 只取 `majority`、`adjudicated`、`unresolved`。裁决优先于多数决；未解决争议条目的 `labels` 为空。
+`source` 取 `majority`、`adjudicated`、`unresolved`、`adjudication_stale`。有效裁决优先于多数决；未解决争议条目与失效裁决条目的 `labels` 均为空。失效裁决行的 `adjudication_status` 为 `stale`，并在 `stale_reasons`、`prior_decision_label`、`prior_reviewer`、`prior_reason` 中保留旧决定与复核依据，可追溯但不可直接采信。
 
 ### SQLite 台账
 
@@ -296,13 +328,15 @@ alpha = 1 - Do / De
 
 | 表 | 主要内容 |
 | --- | --- |
-| `runs` | run_id、时间、方案/数据指纹、主指标、结论、报告路径 |
+| `runs` | run_id、时间、方案/数据指纹、主指标、结论、报告路径、有效/失效裁决数、绑定范围与方案语义指纹 |
 | `validation_findings` | 逐条 error/warning、行号、是否由 strict 提升 |
 | `metrics` | 主指标与 per-label 中间量 |
-| `review_queue` | 条目、理由、票数、得票率、解决状态 |
+| `review_queue` | 条目、理由、票数、得票率、open/resolved/stale 状态 |
 | `annotators` | 一致率、参与量、缺失/越界、outlier 标记 |
-| `adjudications` | 裁决标签、复核人、理由、采纳标记 |
+| `adjudications` | 裁决标签、复核人、理由、采纳标记、valid/stale 状态、失效原因、条目证据与方案证据指纹 |
 | `artifacts` | 文件名、绝对路径、字节数、SHA-256 |
+
+旧版本数据库在首次写入时自动幂等迁移新增列；历史行的绑定状态列为 `NULL`，原有数据保持可读。
 
 ```bash
 python -m tagconsensus history --db var/tagconsensus.db
@@ -316,7 +350,8 @@ python -m tagconsensus history --db var/tagconsensus.db
 - 数据指纹只由文件字节、有效记录数、排序后的标注人集合组成。
 - 方案指纹只由解析后的语义字段组成。
 - 台账的 `started_at` 与 run_id 每次运行自然不同，不属于字节级复现范围。
-- 裁决文件重新读取和重新应用是稳定的；同一裁决重复运行会得到同一最终标签和同一报告正文。
+- 裁决文件重新读取和重新应用是稳定的；同一裁决、同一数据与方案重复运行会得到同一最终标签、同一有效性判定和同一报告正文。
+- 证据绑定只包含排序后的标注人/标签摘要与解析后的方案语义字段，不含时间戳或随机值，绑定指纹可离线复算。
 - 不写随机采样、不写训练模型、不依赖网络时间或外部状态。
 
 ## 9. 目录结构
@@ -388,10 +423,13 @@ pytest --cov=tagconsensus --cov-report=term-missing
 - 完全一致、随机一致、单条目、全缺失、Fleiss 人数不齐、pe == 1、空文件、仅表头；
 - CSV/JSONL、utf-8-sig、gbk、多标签数组、重复标注、越界标签、精确行号；
 - 平票、阈值边界、裁决优先、重复裁决、裁决标签越界；
+- 裁决证据绑定：绑定后正常采纳、同条目投票修订只失效该项、无关条目修订不误伤、`review_threshold`/`label_space`/`min_annotators_per_item`/`multi_label` 变化失效、指标等无关方案字段变化不失效、无绑定历史文件失效、指纹篡改检测、缺失标注改变证据指纹；
+- 失效裁决在 JSON / Markdown / HTML / SQLite 四种输出中均保留 reviewer、reason 与旧决定，且不静默降级为多数票；
+- 旧版本 SQLite 台账的幂等迁移与历史运行回读；
 - 两次运行报告剔除时间字段和 run_id 后完全一致；
 - Web 空状态、正常渲染、查询白名单、nosniff、无公开监听地址、无外部资源引用。
 
-当前测试数为 102，全部通过，无 skip。核心度量与裁决模块覆盖率高于 85%。
+当前测试数为 123，全部通过，无 skip。核心度量、裁决与报告模块覆盖率高于 85%。
 
 ## 11. 验收结果
 
@@ -403,19 +441,29 @@ pytest --cov=tagconsensus --cov-report=term-missing
 $ python -m pip install -e ".[test]"
 Successfully installed pytest-cov-5.0.0 tagconsensus-1.0.0
 
+$ python -m tagconsensus bind-adjudication --config configs/demo.yaml
+bound=2 scope=per_item output=.../data/adjudications/demo_adjudications.jsonl
+
 $ python -m tagconsensus demo --config configs/demo.yaml
-run_id=51a5918635a04769905cc57ecf166190 conclusion=需复核 metric=krippendorff_nominal value=0.498757418398
+run_id=... conclusion=需复核 metric=krippendorff_nominal value=0.498757418398
 records=120 items=20 review=4 adjudicated=2
+adjudications=2 valid=2 stale=0
 output=.../output
 # 退出码 0
 ```
 
-输出目录生成 `report.json`、`report.md`、`report.html`、`consensus.jsonl`，并写入 `var/tagconsensus.db`。
+输出目录生成 `report.json`、`report.md`、`report.html`、`consensus.jsonl`，并写入 `var/tagconsensus.db`。把 `it_0003` 的一张原始投票改票后重跑（裁决文件不动），控制台明确说明失效条目与依据，且旧决定不再覆盖当前共识：
+
+```text
+records=120 items=20 review=4 adjudicated=1
+adjudications=2 valid=1 stale=1
+stale_adjudication item=it_0003 prior=topic_beta reviewer=reviewer_01 reasons=ADJ_ITEM_EVIDENCE_CHANGED
+```
 
 ### 2) 测试
 
 ```text
-102 passed in 3.39s
+123 passed
 ```
 
 无 skip。

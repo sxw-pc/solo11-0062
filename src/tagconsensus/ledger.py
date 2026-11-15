@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS annotators (
 CREATE TABLE IF NOT EXISTS adjudications (
   run_id TEXT NOT NULL, item_id TEXT NOT NULL, decision_label TEXT,
   reviewer TEXT, reason TEXT, adopted INTEGER,
+  status TEXT, stale_reasons TEXT, item_evidence_fingerprint TEXT,
+  scheme_fingerprint TEXT,
   PRIMARY KEY (run_id, item_id)
 );
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -51,6 +53,42 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 """
 
+# Columns added after the initial release; applied idempotently so historical
+# ledger files remain readable while new runs record the binding state.
+ADJUDICATION_MIGRATIONS = (
+    ("status", "ALTER TABLE adjudications ADD COLUMN status TEXT"),
+    ("stale_reasons", "ALTER TABLE adjudications ADD COLUMN stale_reasons TEXT"),
+    ("item_evidence_fingerprint",
+     "ALTER TABLE adjudications ADD COLUMN item_evidence_fingerprint TEXT"),
+    ("scheme_fingerprint",
+     "ALTER TABLE adjudications ADD COLUMN scheme_fingerprint TEXT"),
+)
+RUN_MIGRATIONS = (
+    ("adjudications_valid",
+     "ALTER TABLE runs ADD COLUMN adjudications_valid INTEGER NOT NULL DEFAULT 0"),
+    ("adjudications_stale",
+     "ALTER TABLE runs ADD COLUMN adjudications_stale INTEGER NOT NULL DEFAULT 0"),
+    ("binding_scope", "ALTER TABLE runs ADD COLUMN binding_scope TEXT"),
+    ("decision_scheme_fingerprint",
+     "ALTER TABLE runs ADD COLUMN decision_scheme_fingerprint TEXT"),
+)
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    existing = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(adjudications)").fetchall()
+    }
+    for column, statement in ADJUDICATION_MIGRATIONS:
+        if column not in existing:
+            connection.execute(statement)
+    run_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runs)").fetchall()
+    }
+    for column, statement in RUN_MIGRATIONS:
+        if column not in run_columns:
+            connection.execute(statement)
+
 
 def init_db(db_path: Path) -> None:
     try:
@@ -58,6 +96,7 @@ def init_db(db_path: Path) -> None:
         connection = sqlite3.connect(str(db_path))
         try:
             connection.executescript(SCHEMA)
+            _migrate(connection)
             connection.commit()
         finally:
             connection.close()
@@ -81,6 +120,8 @@ def record_run(
     artifact_by_kind = {entry["kind"]: entry for entry in artifacts}
     metrics = report.get("metrics")
     conclusion = report["conclusion"]
+    binding = report.get("adjudication_binding", {})
+    adjudication_block = report.get("adjudications", {})
     run_row = (
         run["run_id"], run["started_at"], run.get("completed_at"),
         report["config"]["config_path"], report["config"]["fingerprint"],
@@ -94,12 +135,23 @@ def record_run(
         artifact_by_kind.get("report_html", {}).get("path"),
         artifact_by_kind.get("consensus", {}).get("path"),
         report["config"]["output_dir"],
+        adjudication_block.get("valid", 0),
+        adjudication_block.get("stale", 0),
+        binding.get("scope"),
+        binding.get("scheme_fingerprint"),
     )
     try:
         connection = sqlite3.connect(str(db_path))
         try:
             connection.execute(
-                "INSERT OR REPLACE INTO runs VALUES (" + ",".join("?" * 19) + ")", run_row
+                "INSERT OR REPLACE INTO runs ("
+                "run_id, started_at, completed_at, config_path, config_fingerprint, "
+                "data_sha256, data_records, annotator_fingerprint, metric_name, "
+                "metric_value, conclusion, conclusion_label, validation_status, "
+                "error_code, report_json_path, report_md_path, report_html_path, "
+                "consensus_path, output_dir, adjudications_valid, adjudications_stale, "
+                "binding_scope, decision_scheme_fingerprint"
+                ") VALUES (" + ",".join("?" * 23) + ")", run_row
             )
             for table in (
                 "validation_findings", "metrics", "review_queue",
@@ -160,11 +212,18 @@ def record_run(
             adjudication_items = report.get("adjudications", {}).get("items", [])
             _insert_many(
                 connection,
-                "INSERT INTO adjudications VALUES (?,?,?,?,?,?)",
+                "INSERT INTO adjudications ("
+                "run_id, item_id, decision_label, reviewer, reason, adopted, "
+                "status, stale_reasons, item_evidence_fingerprint, scheme_fingerprint"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         run["run_id"], item["item_id"], item["decision_label"],
                         item["reviewer"], item["reason"], int(item["adopted"]),
+                        item.get("status"),
+                        stable_json(item.get("stale_reasons", [])),
+                        _evidence_fingerprint(item, "item"),
+                        _evidence_fingerprint(item, "scheme"),
                     )
                     for item in adjudication_items
                 ],
@@ -187,8 +246,18 @@ def record_run(
         raise LedgerError("LEDGER_WRITE", f"cannot write ledger: {exc}", "db_path") from exc
 
 
-def _metric_row(run_id: str, label: str, item: dict[str, Any]) -> tuple:
-    return (
+def _evidence_fingerprint(item: dict[str, Any], block: str) -> str | None:
+    evidence = item.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    section = evidence.get(block)
+    if not isinstance(section, dict):
+        return None
+    fingerprint = section.get("fingerprint")
+    return fingerprint if isinstance(fingerprint, str) else None
+
+
+def _metric_row(run_id: str, label: str, item: dict[str, Any]) -> tuple:    return (
         run_id, label, item.get("name", ""), item.get("value"), item.get("po"),
         item.get("pe"), item.get("Do"), item.get("De"), item.get("eligible_items", 0),
         item.get("eligible_annotations", 0), item.get("error_code"),
@@ -221,8 +290,10 @@ def list_runs(db_path: Path) -> list[dict[str, Any]]:
         return _rows(
             connection,
             "SELECT run_id, started_at, completed_at, metric_name, metric_value, "
-            "conclusion, conclusion_label, validation_status, data_records, output_dir "
-            "FROM runs ORDER BY started_at DESC, rowid DESC",
+            "conclusion, conclusion_label, validation_status, data_records, output_dir, "
+            "adjudications_valid, adjudications_stale, binding_scope, "
+            "decision_scheme_fingerprint FROM runs "
+            "ORDER BY started_at DESC, rowid DESC",
         )
     finally:
         connection.close()

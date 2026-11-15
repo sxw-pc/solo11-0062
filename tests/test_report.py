@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 
+from tagconsensus.adjudicate import build_evidence_basis
 from tagconsensus.cli import run_demo
+from tagconsensus.config import load_config
 from tagconsensus.report import dump_json, write_consensus, write_reports
 from tagconsensus.models import ConsensusRecord
+from tagconsensus.loader import load_dataset
 
 from conftest import make_config, write_jsonl
 
@@ -18,10 +21,30 @@ def _pipeline_config(tmp_path):
         "A01,it_3,topic_alpha\nA02,it_3,topic_beta\nA03,it_3,topic_gamma\n",
         encoding="utf-8",
     )
-    decisions = write_jsonl(tmp_path / "adjudications.jsonl", [{
+    pre_config = load_config(make_config(
+        tmp_path, data, metric="pairwise_agreement",
+        annotators=["A01", "A02", "A03"], min_annotators=2,
+        review_threshold=0.8,
+        output_dir=tmp_path / "output",
+        db_path=tmp_path / "var" / "tagconsensus.db",
+    ))
+    dataset = load_dataset(pre_config.dataset)
+    basis = build_evidence_basis(dataset, pre_config)
+    bound = {
         "item_id": "it_3", "decision_label": "topic_gamma",
         "reviewer": "reviewer_01", "reason": "tie resolved",
-    }])
+        "evidence": {
+            "binding_schema_version": basis.binding_schema_version,
+            "binding_scope": basis.binding_scope,
+            "item": {"summary": basis.item_evidence["it_3"],
+                     "fingerprint": basis.item_fingerprints["it_3"]},
+            "scheme": {"fields": ["label_space", "multi_label",
+                                  "min_annotators_per_item", "review_threshold"],
+                       "summary": basis.scheme_summary,
+                       "fingerprint": basis.scheme_fingerprint},
+        },
+    }
+    decisions = write_jsonl(tmp_path / "adjudications.jsonl", [bound])
     return make_config(
         tmp_path, data, metric="pairwise_agreement",
         annotators=["A01", "A02", "A03"], min_annotators=2,
@@ -46,9 +69,12 @@ def test_report_contains_required_sections(tmp_path):
     statuses = {item["item_id"]: item["status"] for item in report["review_queue"]}
     assert statuses == {"it_1": "open", "it_3": "resolved"}
     assert report["consensus"]["source_counts"] == {
-        "majority": 1, "adjudicated": 1, "unresolved": 1
+        "majority": 1, "adjudicated": 1, "unresolved": 1, "adjudication_stale": 0
     }
     assert report["adjudications"]["adopted"] == 1
+    assert report["adjudications"]["valid"] == 1
+    assert report["adjudications"]["stale"] == 0
+    assert report["adjudication_binding"]["scope"] == "per_item"
     assert report["adjudications"]["resolved_review_items"] == 1
     assert len(report["leave_one_out"]) == 3
     markdown = (output / "report.md").read_text(encoding="utf-8")
@@ -94,10 +120,19 @@ def test_reports_are_byte_stable_for_identical_report(tmp_path):
         "validation": {"status": "pass", "error_count": 0, "warning_count": 0,
                        "promoted_count": 0, "findings": []},
         "metrics": None, "review_queue": [], "annotators": [], "leave_one_out": [],
-        "adjudications": {"provided": 0, "adopted": 0, "resolved_review_items": 0,
-                          "items": []},
+        "adjudication_binding": {
+            "scope": None, "binding_schema_version": None,
+            "scheme_fields": ["label_space", "multi_label",
+                              "min_annotators_per_item", "review_threshold"],
+            "scheme_fingerprint": None, "scheme_summary": None,
+            "item_fingerprints": {},
+        },
+        "adjudications": {"provided": 0, "adopted": 0, "valid": 0, "stale": 0,
+                          "stale_reason_counts": {},
+                          "resolved_review_items": 0, "items": []},
         "consensus": {"source_counts": {"majority": 0, "adjudicated": 0,
-                                        "unresolved": 0}, "records": []},
+                                        "unresolved": 0,
+                                        "adjudication_stale": 0}, "records": []},
         "error": None,
         "conclusion": {"code": "pass", "label": "通过", "text": "ok"},
     }

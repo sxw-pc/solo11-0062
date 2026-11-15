@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from .adjudicate import DECISION_SCHEME_FIELDS, EvidenceBasis
 from .config import Config
 from .hashing import sha256_file
 from .report_html import render_html
@@ -32,17 +33,45 @@ def _round(value: Any) -> Any:
 
 
 def _review_records(
-    items: Iterable[ItemConsensus], consensus: Iterable[ConsensusRecord]
+    items: Iterable[ItemConsensus],
+    consensus: Iterable[ConsensusRecord],
+    adjudications: Iterable[dict] | None = None,
 ) -> list[dict]:
-    sources = {record.item_id: record.source for record in consensus}
+    record_by_item = {record.item_id: record for record in consensus}
+    stale_by_item = {
+        entry["item_id"]: entry
+        for entry in (adjudications or [])
+        if entry.get("status") == "stale"
+    }
     records = []
     for item in sorted(items, key=lambda entry: entry.item_id):
+        consensus_record = record_by_item.get(item.item_id)
+        source = consensus_record.source if consensus_record else None
+        stale = stale_by_item.get(item.item_id)
         if item.needs_review:
             record = item.to_dict()
             record["reason"] = item.primary_reason
             record["status"] = (
-                "resolved" if sources.get(item.item_id) == "adjudicated" else "open"
+                "resolved" if source == "adjudicated" else "open"
             )
+            record["stale_reasons"] = []
+            record["prior_decision_label"] = None
+            record["prior_reviewer"] = None
+            if stale is not None:
+                record["status"] = "stale"
+                record["stale_reasons"] = list(stale.get("stale_reasons", ()))
+                record["prior_decision_label"] = stale.get("decision_label")
+                record["prior_reviewer"] = stale.get("reviewer")
+            records.append(record)
+        elif stale is not None:
+            # The item no longer needs majority-level review, but its bound
+            # decision has expired; it still must enter the re-review queue.
+            record = item.to_dict()
+            record["reason"] = "ADJUDICATION_STALE"
+            record["status"] = "stale"
+            record["stale_reasons"] = list(stale.get("stale_reasons", ()))
+            record["prior_decision_label"] = stale.get("decision_label")
+            record["prior_reviewer"] = stale.get("reviewer")
             records.append(record)
     return records
 
@@ -53,6 +82,9 @@ def _conclusion(
     if validation.blocked or error is not None:
         return {"code": "blocked", "label": "阻断",
                 "text": "存在阻断级问题，本次结果不得作为共识标签使用。"}
+    if any(item["status"] == "stale" for item in review):
+        return {"code": "review", "label": "需复核",
+                "text": "存在依据过期的裁决，旧决定不得覆盖当前共识，必须重新核验后方可使用。"}
     if validation.warning_count or any(item["status"] == "open" for item in review):
         return {"code": "review", "label": "需复核",
                 "text": "数据可用但存在告警或争议条目，必须经人工复核后方可使用。"}
@@ -66,15 +98,45 @@ def build_report(
     metric: MetricResult | None = None, items: Iterable[ItemConsensus] = (),
     annotators: Iterable[AnnotatorStat] = (), leave_one_out: Iterable[LeaveOneOut] = (),
     adjudications: list[dict] | None = None,
+    binding_basis: EvidenceBasis | None = None,
     consensus: Iterable[ConsensusRecord] = (), error: dict | None = None,
 ) -> dict[str, Any]:
     consensus_list = [record.to_dict() for record in consensus]
-    review = _review_records(items, consensus) if consensus_list else []
     decision_items = adjudications or []
+    review = (
+        _review_records(items, consensus, decision_items) if consensus_list else []
+    )
     resolved = sum(1 for item in review if item["status"] == "resolved")
-    source_counts = {"majority": 0, "adjudicated": 0, "unresolved": 0}
+    stale_decisions = [
+        entry for entry in decision_items if entry.get("status") == "stale"
+    ]
+    valid_decisions = [
+        entry for entry in decision_items if entry.get("status") == "valid"
+    ]
+    stale_reason_counts: dict[str, int] = {}
+    for entry in stale_decisions:
+        for code in entry.get("stale_reasons", ()):
+            stale_reason_counts[code] = stale_reason_counts.get(code, 0) + 1
+    source_counts = {
+        "majority": 0, "adjudicated": 0, "unresolved": 0, "adjudication_stale": 0,
+    }
     for record in consensus_list:
         source_counts[record["source"]] = source_counts.get(record["source"], 0) + 1
+    binding = {
+        "scope": binding_basis.binding_scope if binding_basis else None,
+        "binding_schema_version": (
+            binding_basis.binding_schema_version if binding_basis else None
+        ),
+        "scheme_fields": list(DECISION_SCHEME_FIELDS),
+        "scheme_fingerprint": (
+            binding_basis.scheme_fingerprint if binding_basis else None
+        ),
+        "scheme_summary": binding_basis.scheme_summary if binding_basis else None,
+        "item_fingerprints": (
+            dict(sorted(binding_basis.item_fingerprints.items()))
+            if binding_basis else {}
+        ),
+    }
     result = {
         "schema_version": "1.0", "tool": "tagconsensus",
         "run": {"run_id": run_id, "started_at": started_at,
@@ -99,8 +161,13 @@ def build_report(
                                    entry.annotator_id),
             )
         ],
+        "adjudication_binding": binding,
         "adjudications": {
-            "provided": len(decision_items), "adopted": len(decision_items),
+            "provided": len(decision_items),
+            "adopted": len(valid_decisions),
+            "valid": len(valid_decisions),
+            "stale": len(stale_decisions),
+            "stale_reason_counts": dict(sorted(stale_reason_counts.items())),
             "resolved_review_items": resolved,
             "items": sorted(decision_items, key=lambda entry: entry["item_id"]),
         },
@@ -122,6 +189,17 @@ def _fmt(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.12f}".rstrip("0").rstrip(".")
     return str(value)
+
+
+def _evidence_fp(item: dict, block: str) -> str:
+    evidence = item.get("evidence")
+    if not isinstance(evidence, dict):
+        return "-"
+    section = evidence.get(block)
+    if not isinstance(section, dict):
+        return "-"
+    fingerprint = section.get("fingerprint")
+    return fingerprint if isinstance(fingerprint, str) else "-"
 
 
 def _table(headers: list[str], rows: Iterable[Iterable[Any]]) -> list[str]:
@@ -176,10 +254,13 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(["", "## 复核队列", ""])
     if report["review_queue"]:
         lines.extend(_table(
-            ["item", "reason", "status", "votes", "rate", "annotators"],
+            ["item", "reason", "status", "votes", "rate", "annotators",
+             "stale_reasons", "prior_decision"],
             ([item["item_id"], item["reason"], item["status"],
               json.dumps(item["vote_counts"], ensure_ascii=False, sort_keys=True),
-              _fmt(item["vote_rate"]), item["annotator_count"]]
+              _fmt(item["vote_rate"]), item["annotator_count"],
+              ",".join(item.get("stale_reasons", [])) or "-",
+              item.get("prior_decision_label") or "-"]
              for item in report["review_queue"])))
     else:
         lines.append("无。")
@@ -198,13 +279,40 @@ def render_markdown(report: dict[str, Any]) -> str:
             ["annotator", "value_without", "delta", "error"],
             ([item["annotator_id"], _fmt(item["value"]), _fmt(item["delta"]),
               _fmt(item["error_code"])] for item in report["leave_one_out"])))
+    binding = report["adjudication_binding"]
+    adjudication = report["adjudications"]
     lines.extend([
-        "", "## 裁决与共识输出", "",
-        f"裁决文件条目 {report['adjudications']['provided']}；"
-        f"采纳 {report['adjudications']['adopted']}；"
-        f"解决复核条目 {report['adjudications']['resolved_review_items']}。",
+        "", "## 裁决依据绑定", "",
+        f"绑定范围（scope）：`{binding['scope'] or '-'}`；"
+        f"绑定结构版本：`{binding['binding_schema_version'] or '-'}`。",
+        "影响判定的方案字段：`" +
+        json.dumps(binding["scheme_fields"], ensure_ascii=False) + "`。",
+        f"方案语义指纹：`{binding['scheme_fingerprint'] or '-'}`。",
+        f"本次裁决 {adjudication['provided']} 条；有效 {adjudication['valid']} 条；"
+        f"失效 {adjudication['stale']} 条；失效依据计数：`" +
+        json.dumps(adjudication["stale_reason_counts"], ensure_ascii=False,
+                   sort_keys=True) + "`。",
+        "",
+    ])
+    if adjudication["items"]:
+        lines.extend(_table(
+            ["item", "decision", "reviewer", "status", "stale_reasons",
+             "item_evidence", "scheme_evidence"],
+            ([item["item_id"], item["decision_label"], item["reviewer"],
+              item["status"], ",".join(item.get("stale_reasons", [])) or "-",
+              _evidence_fp(item, "item"), _evidence_fp(item, "scheme")]
+             for item in adjudication["items"])))
+        lines.append("")
+    lines.extend([
+        "## 裁决与共识输出", "",
+        f"裁决文件条目 {adjudication['provided']}；"
+        f"采纳（有效）{adjudication['adopted']}；"
+        f"失效待重新核验 {adjudication['stale']}；"
+        f"解决复核条目 {adjudication['resolved_review_items']}。",
         "共识来源统计：`" +
-        json.dumps(report["consensus"]["source_counts"], sort_keys=True) + "`。", "",
+        json.dumps(report["consensus"]["source_counts"], sort_keys=True) + "`。",
+        "失效裁决不会覆盖当前多数结果，也不计为已解决；其 reviewer、reason 与旧决定保留在"
+        " consensus.jsonl、本报告与 SQLite 台账中。", "",
     ])
     if report["error"]:
         lines.extend(["## 错误", "",
