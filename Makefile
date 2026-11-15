@@ -1,4 +1,4 @@
-.PHONY: install demo test serve history strict clean
+.PHONY: install demo test serve history findings strict clean
 
 install:
 	python -m pip install -e ".[test]"
@@ -14,6 +14,9 @@ serve:
 
 history:
 	python -m tagconsensus history --db var/tagconsensus.db
+
+findings:
+	python -m tagconsensus findings --db var/tagconsensus.db
 
 strict:
 	python -m tagconsensus demo --config configs/strict.yaml

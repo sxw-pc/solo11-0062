@@ -19,6 +19,14 @@ class ValidationFinding:
     annotator_id: str | None = None
     line_no: int | None = None
     promoted: bool = False
+    # Line-free semantic payload (e.g. the offending label) set by producers.
+    content: str = ""
+    # Cross-run identity material, assigned once by validate.assign_identities.
+    finding_key: str | None = None
+    content_key: str | None = None
+    row_digest: str | None = None
+    # Normalized source row, only populated when the plan sets persist_raw_rows.
+    row: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -29,6 +37,11 @@ class ValidationFinding:
             "annotator_id": self.annotator_id,
             "line_no": self.line_no,
             "promoted": self.promoted,
+            "content": self.content,
+            "finding_key": self.finding_key,
+            "content_key": self.content_key,
+            "row_digest": self.row_digest,
+            "row": self.row,
         }
 
 

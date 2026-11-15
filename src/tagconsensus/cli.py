@@ -12,6 +12,7 @@ from typing import Any
 from .adjudicate import apply_adjudications, load_adjudications
 from .config import Config, load_config
 from .errors import TagConsensusError
+from .finding_history import STATUSES, compare_findings
 from .items import annotator_stats, build_items, leave_one_out
 from .ledger import list_runs, record_run
 from .loader import load_dataset
@@ -109,6 +110,59 @@ def run_history(db_path: str) -> int:
     return 0
 
 
+def _cell(value: Any) -> str:
+    return str(value) if value is not None else "-"
+
+
+def _finding_line(status: str, entry: dict) -> str:
+    ids = f"item={_cell(entry['item_id'])} annotator={_cell(entry['annotator_id'])}"
+    if status == "new":
+        line = f"line={_cell(entry['current_line_no'])}"
+    elif status == "resolved":
+        line = f"line={_cell(entry['previous_line_no'])}"
+    else:
+        line = (
+            f"line={_cell(entry['previous_line_no'])}"
+            f"->{_cell(entry['current_line_no'])}"
+        )
+    flags = [
+        name
+        for name in ("line_changed", "content_changed", "row_changed")
+        if entry[name]
+    ]
+    suffix = f" flags={','.join(flags)}" if flags else ""
+    return f"{status.upper()} {entry['code']} {ids} {line}{suffix}"
+
+
+def run_findings(db_path: str, run_id: str | None, against_run_id: str | None) -> int:
+    result = compare_findings(Path(db_path), run_id, against_run_id)
+    if not result["comparable"]:
+        parts = [f"comparable=false reason={result['reason']}"]
+        if result.get("run_id"):
+            parts.append(f"run={result['run_id']}")
+        if result.get("against_run_id"):
+            parts.append(f"against={result['against_run_id']}")
+        if result.get("detail"):
+            parts.append(f"detail={result['detail']}")
+        print(" ".join(parts))
+        return 0
+    counts = result["counts"]
+    print(
+        f"run={result['run_id']} against={result['against_run_id']} "
+        f"comparable=true data_changed={str(result['data_changed']).lower()}"
+    )
+    print(
+        f"new={counts['new']} persisting={counts['persisting']} "
+        f"resolved={counts['resolved']} line_changed={counts['line_changed']} "
+        f"content_changed={counts['content_changed']} "
+        f"row_changed={counts['row_changed']}"
+    )
+    for status in STATUSES:
+        for entry in result[status]:
+            print(_finding_line(status, entry))
+    return 0
+
+
 def run_serve(config_path: str) -> int:
     config = load_config(config_path)
     from .webapp import create_app
@@ -126,6 +180,14 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--config", required=True)
     history = subparsers.add_parser("history", help="list ledger runs")
     history.add_argument("--db", default="var/tagconsensus.db")
+    findings = subparsers.add_parser(
+        "findings", help="compare validation findings between two ledger runs"
+    )
+    findings.add_argument("--db", default="var/tagconsensus.db")
+    findings.add_argument("--run", default=None, help="run to report on; default latest")
+    findings.add_argument(
+        "--against", default=None, help="earlier run to compare with; default previous"
+    )
     serve = subparsers.add_parser("serve", help="start the local read-only viewer")
     serve.add_argument("--config", required=True)
     return parser
@@ -138,6 +200,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_demo(args.config)
         if args.command == "history":
             return run_history(args.db)
+        if args.command == "findings":
+            return run_findings(args.db, args.run, args.against)
         if args.command == "serve":
             return run_serve(args.config)
     except TagConsensusError as exc:

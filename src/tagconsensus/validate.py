@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Iterable
 
 from .config import Config
+from .hashing import sha256_text, stable_json
 from .models import Annotation, Dataset, ValidationFinding
 
 SEVERITY_ORDER = {"error": 0, "warning": 1}
+
+# Findings caused by one concrete input record; identity is anchored on it.
+RECORD_SCOPED_CODES = {
+    "EMPTY_LABEL",
+    "INVALID_CONFIDENCE",
+    "LABEL_OUT_OF_SPACE",
+    "MULTI_LABEL_NOT_ENABLED",
+    "DUPLICATE_ANNOTATION",
+}
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,84 @@ def _sort_key(finding: ValidationFinding) -> tuple:
         finding.annotator_id or "",
         finding.message,
     )
+
+
+def normalized_row_dict(row: Annotation) -> dict:
+    """Canonical form of one input record; the finding's data fingerprint."""
+    return {
+        "annotator_id": row.annotator_id,
+        "item_id": row.item_id,
+        "labels": list(row.labels),
+        "confidence": row.confidence,
+    }
+
+
+def _identity_scope(finding: ValidationFinding) -> tuple:
+    """Stable locator for a finding, independent of line numbers and messages."""
+    code = finding.code
+    if code in RECORD_SCOPED_CODES:
+        return ("record", finding.annotator_id or "", finding.item_id or "")
+    if code == "UNKNOWN_ANNOTATOR":
+        return ("annotator", finding.annotator_id or "")
+    if code == "INSUFFICIENT_ANNOTATORS":
+        return ("item", finding.item_id or "")
+    if finding.annotator_id and finding.item_id:
+        return ("record", finding.annotator_id, finding.item_id)
+    if finding.item_id:
+        return ("item", finding.item_id)
+    if finding.annotator_id:
+        return ("annotator", finding.annotator_id)
+    return ("message", finding.message)
+
+
+def assign_identities(
+    findings: Iterable[ValidationFinding],
+    dataset: Dataset,
+    persist_rows: bool = False,
+) -> list[ValidationFinding]:
+    """Attach cross-run identity material to every finding.
+
+    ``finding_key`` identifies the same logical problem across runs: the code
+    plus a line-number-free scope plus an occurrence ordinal that keeps
+    multiple findings on one record (e.g. repeated duplicate keys) distinct.
+    ``content_key`` fingerprints the line-free semantic content, so a value
+    change (revised label, new count) is visible without breaking identity.
+    ``row_digest`` fingerprints the normalized source record when the finding
+    can be located to one. ``row`` keeps that record verbatim only when the
+    plan opts into ``persist_raw_rows``.
+    """
+    findings = list(findings)
+    rows_by_line = {row.line_no: row for row in dataset.annotations}
+    scopes = {id(item): _identity_scope(item) for item in findings}
+    groups: dict[tuple, list[ValidationFinding]] = {}
+    for item in findings:
+        groups.setdefault((item.code, scopes[id(item)]), []).append(item)
+    ordinals: dict[int, int] = {}
+    for members in groups.values():
+        ordered = sorted(
+            members,
+            key=lambda item: (item.line_no or 0, item.message, item.content),
+        )
+        for index, item in enumerate(ordered, start=1):
+            ordinals[id(item)] = index
+    assigned: list[ValidationFinding] = []
+    for item in findings:
+        key_payload = [item.code, *scopes[id(item)], ordinals[id(item)]]
+        content_payload = [item.code, item.severity, item.promoted, item.content]
+        record = rows_by_line.get(item.line_no) if item.line_no is not None else None
+        row_dict = normalized_row_dict(record) if record is not None else None
+        assigned.append(
+            dataclasses.replace(
+                item,
+                finding_key=sha256_text(stable_json(key_payload)),
+                content_key=sha256_text(stable_json(content_payload)),
+                row_digest=(
+                    sha256_text(stable_json(row_dict)) if row_dict is not None else None
+                ),
+                row=row_dict if (persist_rows and row_dict is not None) else None,
+            )
+        )
+    return assigned
 
 
 def _duplicate_findings(annotations: Iterable[Annotation]) -> list[ValidationFinding]:
@@ -125,6 +214,7 @@ def validate_dataset(dataset: Dataset, config: Config) -> ValidationResult:
                         item_id=row.item_id,
                         annotator_id=row.annotator_id,
                         line_no=row.line_no,
+                        content=f"label={label}",
                     )
                 )
         if not config.multi_label and len(row.labels) > 1:
@@ -136,6 +226,7 @@ def validate_dataset(dataset: Dataset, config: Config) -> ValidationResult:
                     item_id=row.item_id,
                     annotator_id=row.annotator_id,
                     line_no=row.line_no,
+                    content="labels=" + ",".join(row.labels),
                 )
             )
 
@@ -148,24 +239,27 @@ def validate_dataset(dataset: Dataset, config: Config) -> ValidationResult:
                     f"item has {count} non-empty annotations; minimum is "
                     f"{config.min_annotators_per_item}",
                     item_id=item_id,
+                    content=(
+                        f"count={count};min={config.min_annotators_per_item}"
+                    ),
                 )
             )
 
     if config.strict:
         findings = [
-            ValidationFinding(
-                item.code,
-                "error",
-                f"strict mode promotes warning: {item.message}",
-                item.item_id,
-                item.annotator_id,
-                item.line_no,
-                True,
+            dataclasses.replace(
+                item,
+                severity="error",
+                message=f"strict mode promotes warning: {item.message}",
+                promoted=True,
             )
             if item.severity == "warning"
             else item
             for item in findings
         ]
+    findings = assign_identities(
+        findings, dataset, persist_rows=config.persist_raw_rows
+    )
     findings.sort(key=_sort_key)
     error_count = sum(1 for item in findings if item.severity == "error")
     warning_count = sum(1 for item in findings if item.severity == "warning")

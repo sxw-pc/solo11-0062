@@ -12,7 +12,8 @@ from .hashing import stable_json
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, completed_at TEXT,
-  config_path TEXT, config_fingerprint TEXT, data_sha256 TEXT, data_records INTEGER,
+  config_path TEXT, config_fingerprint TEXT, finding_scope_fingerprint TEXT,
+  data_sha256 TEXT, data_records INTEGER,
   annotator_fingerprint TEXT, metric_name TEXT, metric_value REAL,
   conclusion TEXT, conclusion_label TEXT, validation_status TEXT, error_code TEXT,
   report_json_path TEXT, report_md_path TEXT, report_html_path TEXT,
@@ -21,7 +22,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS validation_findings (
   id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, code TEXT NOT NULL,
   severity TEXT NOT NULL, message TEXT NOT NULL, item_id TEXT, annotator_id TEXT,
-  line_no INTEGER, promoted INTEGER NOT NULL DEFAULT 0
+  line_no INTEGER, promoted INTEGER NOT NULL DEFAULT 0,
+  finding_key TEXT, content_key TEXT, row_digest TEXT, row_json TEXT
 );
 CREATE TABLE IF NOT EXISTS metrics (
   run_id TEXT NOT NULL, label TEXT NOT NULL, metric_name TEXT NOT NULL,
@@ -51,6 +53,25 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 """
 
+# Columns added after the first release; old databases gain them via ALTER
+# and keep NULLs, which marks their runs as lacking finding identity material.
+MIGRATIONS = {
+    "runs": ("finding_scope_fingerprint TEXT",),
+    "validation_findings": (
+        "finding_key TEXT", "content_key TEXT", "row_digest TEXT", "row_json TEXT",
+    ),
+}
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    for table, columns in MIGRATIONS.items():
+        existing = {
+            row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+        }
+        for column in columns:
+            if column.split()[0] not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+
 
 def init_db(db_path: Path) -> None:
     try:
@@ -58,6 +79,7 @@ def init_db(db_path: Path) -> None:
         connection = sqlite3.connect(str(db_path))
         try:
             connection.executescript(SCHEMA)
+            _migrate(connection)
             connection.commit()
         finally:
             connection.close()
@@ -84,6 +106,7 @@ def record_run(
     run_row = (
         run["run_id"], run["started_at"], run.get("completed_at"),
         report["config"]["config_path"], report["config"]["fingerprint"],
+        report["config"].get("finding_scope_fingerprint"),
         report["data"]["file_sha256"], report["data"]["record_count"],
         report["data"]["annotator_fingerprint"],
         metrics["name"] if metrics else None, metrics["value"] if metrics else None,
@@ -99,7 +122,7 @@ def record_run(
         connection = sqlite3.connect(str(db_path))
         try:
             connection.execute(
-                "INSERT OR REPLACE INTO runs VALUES (" + ",".join("?" * 19) + ")", run_row
+                "INSERT OR REPLACE INTO runs VALUES (" + ",".join("?" * 20) + ")", run_row
             )
             for table in (
                 "validation_findings", "metrics", "review_queue",
@@ -109,13 +132,17 @@ def record_run(
             _insert_many(
                 connection,
                 "INSERT INTO validation_findings "
-                "(run_id,code,severity,message,item_id,annotator_id,line_no,promoted) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "(run_id,code,severity,message,item_id,annotator_id,line_no,promoted,"
+                "finding_key,content_key,row_digest,row_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         run["run_id"], item["code"], item["severity"], item["message"],
                         item["item_id"], item["annotator_id"], item["line_no"],
                         int(bool(item["promoted"])),
+                        item.get("finding_key"), item.get("content_key"),
+                        item.get("row_digest"),
+                        stable_json(item["row"]) if item.get("row") is not None else None,
                     )
                     for item in report["validation"]["findings"]
                 ],

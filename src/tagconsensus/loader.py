@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 import io
 import json
 from pathlib import Path
@@ -42,6 +43,7 @@ def _confidence(value: Any, line_no: int) -> tuple[float | None, list[Validation
                 "warning",
                 "confidence is not numeric; treated as missing",
                 line_no=line_no,
+                content="not_numeric",
             )
         ]
     if number < 0.0 or number > 1.0:
@@ -51,9 +53,20 @@ def _confidence(value: Any, line_no: int) -> tuple[float | None, list[Validation
                 "warning",
                 "confidence is outside [0, 1]",
                 line_no=line_no,
+                content="out_of_range",
             )
         ]
     return number, []
+
+
+def _locate(
+    findings: list[ValidationFinding], annotator_id: str, item_id: str
+) -> list[ValidationFinding]:
+    """Anchor parse-time findings to their record so identity can locate them."""
+    return [
+        dataclasses.replace(item, annotator_id=annotator_id, item_id=item_id)
+        for item in findings
+    ]
 
 
 def _read_text(path: Path, encoding: str) -> tuple[str, str]:
@@ -128,7 +141,7 @@ def _load_csv(text: str, source: str, digest: str) -> Dataset:
         confidence = None
         if confidence_index is not None:
             confidence, confidence_findings = _confidence(row[confidence_index], line_no)
-            findings.extend(confidence_findings)
+            findings.extend(_locate(confidence_findings, annotator_id, item_id))
         annotations.append(
             Annotation(annotator_id, item_id, labels, confidence, line_no)
         )
@@ -182,7 +195,7 @@ def _load_jsonl(text: str, source: str, digest: str) -> Dataset:
             )
             continue
         confidence, confidence_findings = _confidence(raw.get("confidence"), line_no)
-        findings.extend(confidence_findings)
+        findings.extend(_locate(confidence_findings, annotator_id, item_id))
         annotations.append(
             Annotation(annotator_id, item_id, labels, confidence, line_no)
         )

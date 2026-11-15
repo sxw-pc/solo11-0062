@@ -28,6 +28,7 @@ TOP_LEVEL = {
     "output_dir",
     "db_path",
     "strict",
+    "persist_raw_rows",
 }
 DATASET_FIELDS = {"path", "format", "encoding"}
 
@@ -56,7 +57,9 @@ class Config:
     output_dir: Path
     db_path: Path
     strict: bool
+    persist_raw_rows: bool
     fingerprint: str
+    finding_scope_fingerprint: str
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -78,7 +81,9 @@ class Config:
             "output_dir": str(self.output_dir),
             "db_path": str(self.db_path),
             "strict": self.strict,
+            "persist_raw_rows": self.persist_raw_rows,
             "fingerprint": self.fingerprint,
+            "finding_scope_fingerprint": self.finding_scope_fingerprint,
         }
 
 
@@ -227,6 +232,7 @@ def load_config(path: str | Path) -> Config:
     outlier_threshold = _threshold(raw, "outlier_threshold", 0.65)
     multi_label = _parse_bool(raw, "multi_label", False)
     strict = _parse_bool(raw, "strict", False)
+    persist_raw_rows = _parse_bool(raw, "persist_raw_rows", False)
     output_dir = _resolve(
         base, _normal_text(_required(raw, "output_dir", "output_dir"), "output_dir")
     )
@@ -258,6 +264,17 @@ def load_config(path: str | Path) -> Config:
         "output_dir": str(output_dir),
         "db_path": str(db_path),
         "strict": strict,
+        "persist_raw_rows": persist_raw_rows,
+    }
+    # Fields that decide which validation findings exist. Runs may only be
+    # compared for finding tracking while this scope fingerprint matches.
+    finding_scope = {
+        "dataset": semantic["dataset"],
+        "label_space": semantic["label_space"],
+        "annotators": semantic["annotators"],
+        "multi_label": multi_label,
+        "min_annotators_per_item": min_annotators,
+        "strict": strict,
     }
     return Config(
         config_path=config_path,
@@ -274,5 +291,7 @@ def load_config(path: str | Path) -> Config:
         output_dir=output_dir,
         db_path=db_path,
         strict=strict,
+        persist_raw_rows=persist_raw_rows,
         fingerprint=sha256_text(stable_json(semantic)),
+        finding_scope_fingerprint=sha256_text(stable_json(finding_scope)),
     )

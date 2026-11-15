@@ -122,6 +122,7 @@ A04,it_0001,
 | `output_dir` | 是 | - | 报告与共识文件目录 |
 | `db_path` | 否 | 派生 | SQLite 台账文件路径 |
 | `strict` | 否 | `false` | 为 `true` 时把所有 warning 提升为 error |
+| `persist_raw_rows` | 否 | `false` | 为 `true` 时在台账中持久化 finding 对应的规范化原始行 |
 
 示例：见 `configs/demo.yaml` 与 `configs/strict.yaml`。字段名未知、类型错误、未知指标、阈值越界、标签为空或重复、pair 不在白名单等都会给出稳定错误码和字段路径。
 
@@ -296,8 +297,8 @@ alpha = 1 - Do / De
 
 | 表 | 主要内容 |
 | --- | --- |
-| `runs` | run_id、时间、方案/数据指纹、主指标、结论、报告路径 |
-| `validation_findings` | 逐条 error/warning、行号、是否由 strict 提升 |
+| `runs` | run_id、时间、方案/数据指纹、校验域指纹、主指标、结论、报告路径 |
+| `validation_findings` | 逐条 error/warning、行号、是否由 strict 提升、finding 身份材料 |
 | `metrics` | 主指标与 per-label 中间量 |
 | `review_queue` | 条目、理由、票数、得票率、解决状态 |
 | `annotators` | 一致率、参与量、缺失/越界、outlier 标记 |
@@ -307,6 +308,24 @@ alpha = 1 - Do / De
 ```bash
 python -m tagconsensus history --db var/tagconsensus.db
 ```
+
+### 跨运行 finding 追踪
+
+每条校验 finding 在 `validate` 阶段获得稳定的跨运行身份，随报告写入台账：
+
+- `finding_key`：错误码 + 定位域 + 序号 的哈希。定位域不含行号：记录级 finding（`EMPTY_LABEL`、`LABEL_OUT_OF_SPACE`、`MULTI_LABEL_NOT_ENABLED`、`INVALID_CONFIDENCE`、`DUPLICATE_ANNOTATION`）锚定 `(annotator_id, item_id)`；`UNKNOWN_ANNOTATOR` 锚定标注人；`INSUFFICIENT_ANNOTATORS` 锚定条目；其余锚定消息内容。同一记录上的多条同类 finding（如同一重复键产生多条 `DUPLICATE_ANNOTATION`）按确定顺序编号区分，因此行重排不会改变身份。
+- `content_key`：行号无关的语义内容哈希（如越界标签值、条目计数）。标签修订后身份不变但内容标记为变化，避免把未修复问题误报成「已消退 + 新发」。
+- `row_digest`：finding 对应规范化输入记录的哈希；无法定位到单条记录时为空。
+
+```bash
+python -m tagconsensus findings --db var/tagconsensus.db [--run ID] [--against ID]
+```
+
+`findings` 把某次运行（默认最新）与之前一次运行按 `finding_key` 比对，输出每条 finding 的状态：`NEW`（新发）、`PERSISTING`（持续）、`RESOLVED`（已消退），并同时保留上次/本次行号。行号变化（`line_changed`）与 finding 内容变化（`content_changed`）、记录内容变化（`row_changed`）分别标记。
+
+只有两次运行都带有身份材料、且校验相关的方案语义（数据路径/格式/编码、label_space、标注人白名单、multi_label、min_annotators_per_item、strict，合并为校验域指纹）完全一致时才计算状态；否则明确报不可比并给出原因：`no_runs` / `no_previous_run` / `run_not_found` / `missing_identity_material`（旧版本写入的运行缺少身份材料）/ `config_incompatible`。两次运行的数据指纹（文件 SHA-256）总会随修复变化，因此不作为可比性条件，而是以 `data_changed` 展示；不猜测修复结论。
+
+`persist_raw_rows: true` 时，台账额外保存每条可定位 finding 的规范化原始行（`row_json`），比较结果中可看到上次的/本次的记录内容，便于审计与日后按新规则重算身份；代价是占用更多存储。默认只存 `row_digest` 与 `finding_key`，节省空间，但历史上无法还原原行细节。旧版台账在首次打开时自动迁移补列，旧运行的身份列保持 NULL。
 
 ## 8. 可复现性
 
@@ -347,6 +366,7 @@ tagconsensus/
     items.py
     adjudicate.py
     ledger.py
+    finding_history.py
     report.py
     report_html.py
     webapp.py
@@ -368,6 +388,7 @@ tagconsensus/
     test_items.py
     test_adjudicate.py
     test_ledger.py
+    test_finding_history.py
     test_report.py
     test_cli_demo.py
     test_webapp_local_only.py
@@ -389,9 +410,10 @@ pytest --cov=tagconsensus --cov-report=term-missing
 - CSV/JSONL、utf-8-sig、gbk、多标签数组、重复标注、越界标签、精确行号；
 - 平票、阈值边界、裁决优先、重复裁决、裁决标签越界；
 - 两次运行报告剔除时间字段和 run_id 后完全一致；
+- finding 身份跨行重排稳定、重复键多条 finding 区分、标签修订记为内容变化、配置变化与旧运行报不可比、规范化原始行按需持久化；
 - Web 空状态、正常渲染、查询白名单、nosniff、无公开监听地址、无外部资源引用。
 
-当前测试数为 102，全部通过，无 skip。核心度量与裁决模块覆盖率高于 85%。
+当前测试数为 116，全部通过，无 skip。核心度量与裁决模块覆盖率高于 85%。
 
 ## 11. 验收结果
 
@@ -468,10 +490,10 @@ $ grep -RIn -E '0\.0\.0\.0|https?://' .
 
 ```text
 $ find . -name "*.py" -not -path "./.pytest_cache/*" -print0 | xargs -0 wc -l | tail -1
-3986 total
+4691 total
 ```
 
-全部 Python 文件单文件不超过 300 行，最大 278 行；总行数处于 2500–4500 行区间。最终统计见交付说明。
+全部 Python 文件单文件不超过 300 行，最大 300 行。最终统计见交付说明。
 
 ### 7) 报告确定性
 
